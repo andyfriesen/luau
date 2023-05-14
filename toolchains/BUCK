@@ -1,10 +1,61 @@
-# toolchains/BUCK
 load("@prelude//toolchains:cxx.bzl", "system_cxx_toolchain")
 load("@prelude//toolchains:python.bzl", "system_python_bootstrap_toolchain")
+
+# For now, assume that the VS toolchain is on the system path.
+#
+# TODO: Is there a way to do something smarter here?  eg allow the user to
+# pass an option to buck to select a compiler.
+cxx_compiler = select({
+    "DEFAULT": None,
+    "config//os:windows": "cl.exe",
+})
+
+compiler = cxx_compiler
+
+# This controls the commandline switches that buck passes to the compiler.
+compiler_type = select({
+    "DEFAULT": None,
+    "config//os:windows": "windows",
+})
+
+cxx_flags = select({
+    "DEFAULT": [
+        "-std=c++17",
+    ],
+    "config//os:windows": [
+        "/std:c++17",
+        "/EHsc",
+    ]
+})
+
+extra_link_options = select({
+    "DEFAULT": [],
+    "config//os:windows": [
+        # "kernel32.lib",
+        # "user32.lib",
+        # "gdi32.lib",
+        # "winspool.lib",
+        # "shell32.lib",
+        # "ole32.lib",
+        # "oleaut32.lib",
+        # "uuid.lib",
+        # "comdlg32.lib",
+        # "advapi32.lib",
+        "/dynamicbase",
+        "/machine:x64",
+        "/subsystem:console",
+        "/nxcompat",
+    ],
+})
 
 system_cxx_toolchain(
     name = "cxx",
     visibility = ["PUBLIC"],
+    cxx_flags = cxx_flags,
+    compiler = compiler,
+    cxx_compiler = cxx_compiler,
+    compiler_type = compiler_type,
+    link_flags = extra_link_options,
 )
 
 system_python_bootstrap_toolchain(

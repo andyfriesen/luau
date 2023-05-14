@@ -11,7 +11,6 @@ cxx_library(
 
 cxx_library(
     name="Luau.Analysis",
-    compiler_flags=["-std=c++17"],
     srcs=glob(["Analysis/src/*.cpp"]),
     headers=glob(["Analysis/include/**/*.h"]),
     public_include_directories=["Analysis/include"],
@@ -21,7 +20,6 @@ cxx_library(
 
 cxx_library(
     name="Luau.Ast",
-    compiler_flags=["-std=c++17"],
     srcs=glob(["Ast/src/*.cpp"]),
     headers=glob(["Ast/include/**/*.h"]),
     public_include_directories=["Ast/include"],
@@ -31,7 +29,6 @@ cxx_library(
 
 cxx_library(
     name="Luau.VM",
-    compiler_flags=["-std=c++11"],
     srcs=glob(["VM/src/*.cpp"]),
     headers=glob(["VM/include/**/*.h"]),
     # VM/src most certainly should not be public here
@@ -42,7 +39,6 @@ cxx_library(
 
 cxx_library(
     name="Luau.Compiler",
-    compiler_flags=["-std=c++17"],
     srcs=glob(["Compiler/src/*.cpp"]),
     headers=glob(["Compiler/include/**/*.h"]),
     public_include_directories=["Compiler/include"],
@@ -52,7 +48,6 @@ cxx_library(
 
 cxx_library(
     name="Luau.CodeGen",
-    compiler_flags=["-std=c++17"],
     srcs=glob(["CodeGen/src/*.cpp"]),
     headers=glob(["CodeGen/include/CodeGen/*.h"]),
     public_include_directories=["CodeGen/include"],
@@ -62,7 +57,6 @@ cxx_library(
 
 cxx_library(
     name="Luau.CLI",
-    compiler_flags=["-std=c++17"],
     srcs=[
         "CLI/Repl.cpp",
         "CLI/FileUtils.cpp",
@@ -82,7 +76,10 @@ cxx_library(
     visibility=["PUBLIC"],
 
     # FIXME: How do I skip this on Windows?
-    exported_linker_flags=["-lpthread"],
+    exported_linker_flags=select({
+        "DEFAULT": [],
+        "config//os:linux": ["-lpthread"],
+    }),
 
     deps=[
         ":Luau.Common",
