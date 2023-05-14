@@ -111,7 +111,7 @@ TEST_CASE_FIXTURE(Fixture, "generalize_table_property")
     const TableType* tt = get<TableType>(follow(t));
     REQUIRE(tt);
 
-    TypeId fooTy = tt->props.at("foo").type;
+    TypeId fooTy = tt->props.at("foo").type();
     CHECK("<a>(a) -> a" == toString(fooTy));
 }
 
@@ -156,7 +156,7 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "vararg_function_is_quantified")
     REQUIRE(ttv);
 
     REQUIRE(ttv->props.count("f"));
-    TypeId k = ttv->props["f"].type;
+    TypeId k = ttv->props["f"].type();
     REQUIRE(k);
 }
 
@@ -169,14 +169,27 @@ TEST_CASE_FIXTURE(Fixture, "list_only_alternative_overloads_that_match_argument_
 
     LUAU_REQUIRE_ERROR_COUNT(2, result);
 
-    TypeMismatch* tm = get<TypeMismatch>(result.errors[0]);
-    REQUIRE(tm);
-    CHECK_EQ(builtinTypes->numberType, tm->wantedType);
-    CHECK_EQ(builtinTypes->stringType, tm->givenType);
+    if (FFlag::DebugLuauDeferredConstraintResolution)
+    {
+        GenericError* g = get<GenericError>(result.errors[0]);
+        REQUIRE(g);
+        CHECK(g->message == "None of the overloads for function that accept 1 arguments are compatible.");
+    }
+    else
+    {
+        TypeMismatch* tm = get<TypeMismatch>(result.errors[0]);
+        REQUIRE(tm);
+        CHECK_EQ(builtinTypes->numberType, tm->wantedType);
+        CHECK_EQ(builtinTypes->stringType, tm->givenType);
+    }
 
     ExtraInformation* ei = get<ExtraInformation>(result.errors[1]);
     REQUIRE(ei);
-    CHECK_EQ("Other overloads are also not viable: (number) -> string", ei->message);
+
+    if (FFlag::DebugLuauDeferredConstraintResolution)
+        CHECK("Available overloads: (number) -> number; and (number) -> string" == ei->message);
+    else
+        CHECK_EQ("Other overloads are also not viable: (number) -> string", ei->message);
 }
 
 TEST_CASE_FIXTURE(Fixture, "list_all_overloads_if_no_overload_takes_given_argument_count")
@@ -1281,6 +1294,39 @@ f(function(x) return x * 2 end)
     LUAU_REQUIRE_NO_ERRORS(result);
 }
 
+TEST_CASE_FIXTURE(Fixture, "variadic_any_is_compatible_with_a_generic_TypePack")
+{
+    ScopedFastFlag sff[] = {
+        {"LuauVariadicAnyCanBeGeneric", true}
+    };
+
+    CheckResult result = check(R"(
+        --!strict
+        local function f(...) return ... end
+        local g = function(...) return f(...) end
+    )");
+
+    LUAU_REQUIRE_NO_ERRORS(result);
+}
+
+// https://github.com/Roblox/luau/issues/767
+TEST_CASE_FIXTURE(BuiltinsFixture, "variadic_any_is_compatible_with_a_generic_TypePack_2")
+{
+    ScopedFastFlag sff{"LuauVariadicAnyCanBeGeneric", true};
+
+    CheckResult result = check(R"(
+        local function somethingThatsAny(...: any)
+            print(...)
+        end
+
+        local function x<T...>(...: T...)
+            somethingThatsAny(...) -- Failed to unify variadic type packs
+        end
+    )");
+
+    LUAU_REQUIRE_NO_ERRORS(result);
+}
+
 TEST_CASE_FIXTURE(Fixture, "infer_anonymous_function_arguments_outside_call")
 {
     CheckResult result = check(R"(
@@ -1904,6 +1950,42 @@ TEST_CASE_FIXTURE(Fixture, "instantiated_type_packs_must_have_a_non_null_scope")
     )");
 
     LUAU_REQUIRE_NO_ERRORS(result);
+}
+
+TEST_CASE_FIXTURE(Fixture, "inner_frees_become_generic_in_dcr")
+{
+    if (!FFlag::DebugLuauDeferredConstraintResolution)
+        return;
+
+    CheckResult result = check(R"(
+        function f(x)
+            local z = x
+            return x
+        end
+    )");
+
+    LUAU_REQUIRE_NO_ERRORS(result);
+    std::optional<TypeId> ty = findTypeAtPosition(Position{3, 19});
+    REQUIRE(ty);
+    CHECK(get<GenericType>(*ty));
+}
+
+TEST_CASE_FIXTURE(Fixture, "function_exprs_are_generalized_at_signature_scope_not_enclosing")
+{
+    CheckResult result = check(R"(
+        local foo
+        local bar
+
+        -- foo being a function expression is deliberate: the bug we're testing
+        -- only existed for function expressions, not for function statements.
+        foo = function(a)
+            return bar
+        end
+    )");
+
+    LUAU_REQUIRE_NO_ERRORS(result);
+    // note that b is not in the generic list; it is free, the unconstrained type of `bar`.
+    CHECK(toString(requireType("foo")) == "<a>(a) -> b");
 }
 
 TEST_SUITE_END();

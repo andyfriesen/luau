@@ -3,6 +3,7 @@
 #include "Luau/Module.h"
 #include "Luau/Scope.h"
 #include "Luau/RecursionCounter.h"
+#include "Luau/Parser.h"
 
 #include "Fixture.h"
 
@@ -40,6 +41,38 @@ TEST_CASE_FIXTURE(Fixture, "is_within_comment")
     CHECK(!isWithinComment(*sm, Position{2, 15}));
     CHECK(!isWithinComment(*sm, Position{7, 10}));
     CHECK(!isWithinComment(*sm, Position{7, 11}));
+}
+
+TEST_CASE_FIXTURE(Fixture, "is_within_comment_parse_result")
+{
+    std::string src = R"(
+        --!strict
+        local foo = {}
+        function foo:bar() end
+
+        --[[
+            foo:
+        ]] foo:bar()
+
+        --[[]]--[[]] -- Two distinct comments that have zero characters of space between them.
+    )";
+
+    Luau::Allocator alloc;
+    Luau::AstNameTable names{alloc};
+    Luau::ParseOptions parseOptions;
+    parseOptions.captureComments = true;
+    Luau::ParseResult parseResult = Luau::Parser::parse(src.data(), src.size(), names, alloc, parseOptions);
+
+    CHECK_EQ(5, parseResult.commentLocations.size());
+
+    CHECK(isWithinComment(parseResult, Position{1, 15}));
+    CHECK(isWithinComment(parseResult, Position{6, 16}));
+    CHECK(isWithinComment(parseResult, Position{9, 13}));
+    CHECK(isWithinComment(parseResult, Position{9, 14}));
+
+    CHECK(!isWithinComment(parseResult, Position{2, 15}));
+    CHECK(!isWithinComment(parseResult, Position{7, 10}));
+    CHECK(!isWithinComment(parseResult, Position{7, 11}));
 }
 
 TEST_CASE_FIXTURE(Fixture, "dont_clone_persistent_primitive")
@@ -104,7 +137,7 @@ TEST_CASE_FIXTURE(Fixture, "deepClone_cyclic_table")
 
     CHECK_EQ(std::optional<std::string>{"Cyclic"}, ttv->syntheticName);
 
-    TypeId methodType = ttv->props["get"].type;
+    TypeId methodType = ttv->props["get"].type();
     REQUIRE(methodType != nullptr);
 
     const FunctionType* ftv = get<FunctionType>(methodType);
@@ -128,7 +161,7 @@ TEST_CASE_FIXTURE(Fixture, "deepClone_cyclic_table_2")
 
     TypeId methodTy = src.addType(FunctionType{src.addTypePack({}), src.addTypePack({tableTy})});
 
-    tt->props["get"].type = methodTy;
+    tt->props["get"].setType(methodTy);
 
     TypeArena dest;
 
@@ -137,7 +170,7 @@ TEST_CASE_FIXTURE(Fixture, "deepClone_cyclic_table_2")
     TableType* ctt = getMutable<TableType>(cloneTy);
     REQUIRE(ctt);
 
-    TypeId clonedMethodType = ctt->props["get"].type;
+    TypeId clonedMethodType = ctt->props["get"].type();
     REQUIRE(clonedMethodType);
 
     const FunctionType* cmf = get<FunctionType>(clonedMethodType);
@@ -166,7 +199,7 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "builtin_types_point_into_globalTypes_arena")
     TableType* exportsTable = getMutable<TableType>(*exports);
     REQUIRE(exportsTable != nullptr);
 
-    TypeId signType = exportsTable->props["sign"].type;
+    TypeId signType = exportsTable->props["sign"].type();
     REQUIRE(signType != nullptr);
 
     CHECK(!isInArena(signType, module->interfaceTypes));
@@ -307,8 +340,8 @@ TEST_CASE_FIXTURE(Fixture, "clone_recursion_limit")
     {
         TableType* ttv = getMutable<TableType>(nested);
 
-        ttv->props["a"].type = src.addType(TableType{});
-        nested = ttv->props["a"].type;
+        ttv->props["a"].setType(src.addType(TableType{}));
+        nested = ttv->props["a"].type();
     }
 
     TypeArena dest;
@@ -319,6 +352,10 @@ TEST_CASE_FIXTURE(Fixture, "clone_recursion_limit")
 
 TEST_CASE_FIXTURE(Fixture, "any_persistance_does_not_leak")
 {
+    ScopedFastFlag flags[] = {
+        {"LuauOccursIsntAlwaysFailure", true},
+    };
+
     fileResolver.source["Module/A"] = R"(
 export type A = B
 type B = A
@@ -332,7 +369,11 @@ type B = A
     auto mod = frontend.moduleResolver.getModule("Module/A");
     auto it = mod->exportedTypeBindings.find("A");
     REQUIRE(it != mod->exportedTypeBindings.end());
-    CHECK(toString(it->second.type) == "any");
+
+    if (FFlag::DebugLuauDeferredConstraintResolution)
+        CHECK(toString(it->second.type) == "any");
+    else
+        CHECK(toString(it->second.type) == "*error-type*");
 }
 
 TEST_CASE_FIXTURE(BuiltinsFixture, "do_not_clone_reexports")
@@ -370,7 +411,7 @@ return {}
     TypeId typeB = modBiter->second.type;
     TableType* tableB = getMutable<TableType>(typeB);
     REQUIRE(tableB);
-    CHECK(typeA == tableB->props["q"].type);
+    CHECK(typeA == tableB->props["q"].type());
 }
 
 TEST_CASE_FIXTURE(BuiltinsFixture, "do_not_clone_types_of_reexported_values")
@@ -406,7 +447,7 @@ return exports
     REQUIRE(typeB);
     TableType* tableA = getMutable<TableType>(*typeA);
     TableType* tableB = getMutable<TableType>(*typeB);
-    CHECK(tableA->props["a"].type == tableB->props["b"].type);
+    CHECK(tableA->props["a"].type() == tableB->props["b"].type());
 }
 
 TEST_SUITE_END();

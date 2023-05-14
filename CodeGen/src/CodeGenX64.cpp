@@ -41,52 +41,60 @@ namespace CodeGen
 namespace X64
 {
 
-bool initEntryFunction(NativeState& data)
+struct EntryLocations
 {
-    AssemblyBuilderX64 build(/* logText= */ false);
-    UnwindBuilder& unwind = *data.unwindBuilder.get();
+    Label start;
+    Label prologueEnd;
+    Label epilogueStart;
+};
 
-    unwind.start();
+static EntryLocations buildEntryFunction(AssemblyBuilderX64& build, UnwindBuilder& unwind)
+{
+    EntryLocations locations;
+
+    build.align(kFunctionAlignment, X64::AlignmentDataX64::Ud2);
+
+    locations.start = build.setLabel();
+    unwind.startFunction();
 
     // Save common non-volatile registers
-    build.push(rbp);
-    unwind.save(rbp);
-
     if (build.abi == ABIX64::SystemV)
     {
+        // We need to use a standard rbp-based frame setup for debuggers to work with JIT code
+        build.push(rbp);
         build.mov(rbp, rsp);
-        unwind.setupFrameReg(rbp, 0);
     }
 
     build.push(rbx);
-    unwind.save(rbx);
     build.push(r12);
-    unwind.save(r12);
     build.push(r13);
-    unwind.save(r13);
     build.push(r14);
-    unwind.save(r14);
     build.push(r15);
-    unwind.save(r15);
 
     if (build.abi == ABIX64::Windows)
     {
         // Save non-volatile registers that are specific to Windows x64 ABI
         build.push(rdi);
-        unwind.save(rdi);
         build.push(rsi);
-        unwind.save(rsi);
+
+        // On Windows, rbp is available as a general-purpose non-volatile register; we currently don't use it, but we need to push an even number
+        // of registers for stack alignment...
+        build.push(rbp);
 
         // TODO: once we start using non-volatile SIMD registers on Windows, we will save those here
     }
 
     // Allocate stack space (reg home area + local data)
     build.sub(rsp, kStackSize + kLocalsSize);
-    unwind.allocStack(kStackSize + kLocalsSize);
 
-    unwind.finish();
+    locations.prologueEnd = build.setLabel();
 
-    size_t prologueSize = build.setLabel().location;
+    uint32_t prologueSize = build.getLabelOffset(locations.prologueEnd) - build.getLabelOffset(locations.start);
+
+    if (build.abi == ABIX64::SystemV)
+        unwind.prologueX64(prologueSize, kStackSize + kLocalsSize, /* setupFrame= */ true, {rbx, r12, r13, r14, r15});
+    else if (build.abi == ABIX64::Windows)
+        unwind.prologueX64(prologueSize, kStackSize + kLocalsSize, /* setupFrame= */ false, {rbx, r12, r13, r14, r15, rdi, rsi, rbp});
 
     // Setup native execution environment
     build.mov(rState, rArg1);
@@ -104,13 +112,14 @@ bool initEntryFunction(NativeState& data)
     build.jmp(rArg3);
 
     // Even though we jumped away, we will return here in the end
-    Label returnOff = build.setLabel();
+    locations.epilogueStart = build.setLabel();
 
     // Cleanup and exit
     build.add(rsp, kStackSize + kLocalsSize);
 
     if (build.abi == ABIX64::Windows)
     {
+        build.pop(rbp);
         build.pop(rsi);
         build.pop(rdi);
     }
@@ -120,15 +129,36 @@ bool initEntryFunction(NativeState& data)
     build.pop(r13);
     build.pop(r12);
     build.pop(rbx);
-    build.pop(rbp);
+
+    if (build.abi == ABIX64::SystemV)
+        build.pop(rbp);
+
     build.ret();
+
+    // Our entry function is special, it spans the whole remaining code area
+    unwind.finishFunction(build.getLabelOffset(locations.start), kFullBlockFuncton);
+
+    return locations;
+}
+
+bool initHeaderFunctions(NativeState& data)
+{
+    AssemblyBuilderX64 build(/* logText= */ false);
+    UnwindBuilder& unwind = *data.unwindBuilder.get();
+
+    unwind.startInfo(UnwindBuilder::X64);
+
+    EntryLocations entryLocations = buildEntryFunction(build, unwind);
 
     build.finalize();
 
+    unwind.finishInfo();
+
     LUAU_ASSERT(build.data.empty());
 
-    if (!data.codeAllocator.allocate(build.data.data(), int(build.data.size()), build.code.data(), int(build.code.size()), data.gateData,
-            data.gateDataSize, data.context.gateEntry))
+    uint8_t* codeStart = nullptr;
+    if (!data.codeAllocator.allocate(
+            build.data.data(), int(build.data.size()), build.code.data(), int(build.code.size()), data.gateData, data.gateDataSize, codeStart))
     {
         LUAU_ASSERT(!"failed to create entry function");
         return false;
@@ -136,9 +166,10 @@ bool initEntryFunction(NativeState& data)
 
     // Set the offset at the begining so that functions in new blocks will not overlay the locations
     // specified by the unwind information of the entry function
-    unwind.setBeginOffset(prologueSize);
+    unwind.setBeginOffset(build.getLabelOffset(entryLocations.prologueEnd));
 
-    data.context.gateExit = data.context.gateEntry + returnOff.location;
+    data.context.gateEntry = codeStart + build.getLabelOffset(entryLocations.start);
+    data.context.gateExit = codeStart + build.getLabelOffset(entryLocations.epilogueStart);
 
     return true;
 }

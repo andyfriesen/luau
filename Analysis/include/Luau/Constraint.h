@@ -107,6 +107,11 @@ struct FunctionCallConstraint
     TypePackId result;
     class AstExprCall* callSite;
     std::vector<std::optional<TypeId>> discriminantTypes;
+
+    // When we dispatch this constraint, we update the key at this map to record
+    // the overload that we selected.
+    DenseHashMap<const AstNode*, TypeId>* astOriginalCallTypes;
+    DenseHashMap<const AstNode*, TypeId>* astOverloadResolvedTypes;
 };
 
 // result ~ prim ExpectedType SomeSingletonType MultitonType
@@ -193,9 +198,26 @@ struct UnpackConstraint
     TypePackId sourcePack;
 };
 
-using ConstraintV = Variant<SubtypeConstraint, PackSubtypeConstraint, GeneralizationConstraint, InstantiationConstraint, UnaryConstraint,
-    BinaryConstraint, IterableConstraint, NameConstraint, TypeAliasExpansionConstraint, FunctionCallConstraint, PrimitiveTypeConstraint,
-    HasPropConstraint, SetPropConstraint, SetIndexerConstraint, SingletonOrTopTypeConstraint, UnpackConstraint>;
+// ty ~ reduce ty
+//
+// Try to reduce ty, if it is a TypeFamilyInstanceType. Otherwise, do nothing.
+struct ReduceConstraint
+{
+    TypeId ty;
+};
+
+// tp ~ reduce tp
+//
+// Analogous to ReduceConstraint, but for type packs.
+struct ReducePackConstraint
+{
+    TypePackId tp;
+};
+
+using ConstraintV =
+    Variant<SubtypeConstraint, PackSubtypeConstraint, GeneralizationConstraint, InstantiationConstraint, UnaryConstraint, BinaryConstraint,
+        IterableConstraint, NameConstraint, TypeAliasExpansionConstraint, FunctionCallConstraint, PrimitiveTypeConstraint, HasPropConstraint,
+        SetPropConstraint, SetIndexerConstraint, SingletonOrTopTypeConstraint, UnpackConstraint, ReduceConstraint, ReducePackConstraint>;
 
 struct Constraint
 {

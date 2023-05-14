@@ -17,6 +17,7 @@ enum class KindA64 : uint8_t
     none,
     w, // 32-bit GPR
     x, // 64-bit GPR
+    s, // 32-bit SIMD&FP scalar
     d, // 64-bit SIMD&FP scalar
     q, // 128-bit SIMD&FP vector
 };
@@ -36,6 +37,27 @@ struct RegisterA64
         return !(*this == rhs);
     }
 };
+
+constexpr RegisterA64 castReg(KindA64 kind, RegisterA64 reg)
+{
+    LUAU_ASSERT(kind != reg.kind);
+    LUAU_ASSERT(kind != KindA64::none && reg.kind != KindA64::none);
+    LUAU_ASSERT((kind == KindA64::w || kind == KindA64::x) == (reg.kind == KindA64::w || reg.kind == KindA64::x));
+
+    return RegisterA64{kind, reg.index};
+}
+
+// This is equivalent to castReg(KindA64::x), but is separate because it implies different semantics
+// Specifically, there are cases when it's useful to treat a wN register as an xN register *after* it has been assigned a value
+// Since all A64 instructions that write to wN implicitly zero the top half, this works when we need zero extension semantics
+// Crucially, this is *not* safe on an ABI boundary - an int parameter in wN register may have anything in its top half in certain cases
+// However, as long as our codegen doesn't use 32-bit truncation by using castReg x=>w, we can safely rely on this.
+constexpr RegisterA64 zextReg(RegisterA64 reg)
+{
+    LUAU_ASSERT(reg.kind == KindA64::w);
+
+    return RegisterA64{KindA64::x, reg.index};
+}
 
 constexpr RegisterA64 noreg{KindA64::none, 0};
 
@@ -106,6 +128,39 @@ constexpr RegisterA64 x30{KindA64::x, 30};
 constexpr RegisterA64 xzr{KindA64::x, 31};
 
 constexpr RegisterA64 sp{KindA64::none, 31};
+
+constexpr RegisterA64 s0{KindA64::s, 0};
+constexpr RegisterA64 s1{KindA64::s, 1};
+constexpr RegisterA64 s2{KindA64::s, 2};
+constexpr RegisterA64 s3{KindA64::s, 3};
+constexpr RegisterA64 s4{KindA64::s, 4};
+constexpr RegisterA64 s5{KindA64::s, 5};
+constexpr RegisterA64 s6{KindA64::s, 6};
+constexpr RegisterA64 s7{KindA64::s, 7};
+constexpr RegisterA64 s8{KindA64::s, 8};
+constexpr RegisterA64 s9{KindA64::s, 9};
+constexpr RegisterA64 s10{KindA64::s, 10};
+constexpr RegisterA64 s11{KindA64::s, 11};
+constexpr RegisterA64 s12{KindA64::s, 12};
+constexpr RegisterA64 s13{KindA64::s, 13};
+constexpr RegisterA64 s14{KindA64::s, 14};
+constexpr RegisterA64 s15{KindA64::s, 15};
+constexpr RegisterA64 s16{KindA64::s, 16};
+constexpr RegisterA64 s17{KindA64::s, 17};
+constexpr RegisterA64 s18{KindA64::s, 18};
+constexpr RegisterA64 s19{KindA64::s, 19};
+constexpr RegisterA64 s20{KindA64::s, 20};
+constexpr RegisterA64 s21{KindA64::s, 21};
+constexpr RegisterA64 s22{KindA64::s, 22};
+constexpr RegisterA64 s23{KindA64::s, 23};
+constexpr RegisterA64 s24{KindA64::s, 24};
+constexpr RegisterA64 s25{KindA64::s, 25};
+constexpr RegisterA64 s26{KindA64::s, 26};
+constexpr RegisterA64 s27{KindA64::s, 27};
+constexpr RegisterA64 s28{KindA64::s, 28};
+constexpr RegisterA64 s29{KindA64::s, 29};
+constexpr RegisterA64 s30{KindA64::s, 30};
+constexpr RegisterA64 s31{KindA64::s, 31};
 
 constexpr RegisterA64 d0{KindA64::d, 0};
 constexpr RegisterA64 d1{KindA64::d, 1};

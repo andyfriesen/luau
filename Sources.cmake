@@ -89,9 +89,7 @@ target_sources(Luau.CodeGen PRIVATE
     CodeGen/src/CodeGenA64.cpp
     CodeGen/src/CodeGenX64.cpp
     CodeGen/src/EmitBuiltinsX64.cpp
-    CodeGen/src/EmitCommonA64.cpp
     CodeGen/src/EmitCommonX64.cpp
-    CodeGen/src/EmitInstructionA64.cpp
     CodeGen/src/EmitInstructionX64.cpp
     CodeGen/src/Fallbacks.cpp
     CodeGen/src/IrAnalysis.cpp
@@ -105,12 +103,14 @@ target_sources(Luau.CodeGen PRIVATE
     CodeGen/src/IrTranslateBuiltins.cpp
     CodeGen/src/IrTranslation.cpp
     CodeGen/src/IrUtils.cpp
+    CodeGen/src/IrValueLocationTracking.cpp
     CodeGen/src/NativeState.cpp
     CodeGen/src/OptimizeConstProp.cpp
     CodeGen/src/OptimizeFinalX64.cpp
     CodeGen/src/UnwindBuilderDwarf2.cpp
     CodeGen/src/UnwindBuilderWin.cpp
 
+    CodeGen/src/BitUtils.h
     CodeGen/src/ByteUtils.h
     CodeGen/src/CustomExecUtils.h
     CodeGen/src/CodeGenUtils.h
@@ -120,7 +120,6 @@ target_sources(Luau.CodeGen PRIVATE
     CodeGen/src/EmitCommon.h
     CodeGen/src/EmitCommonA64.h
     CodeGen/src/EmitCommonX64.h
-    CodeGen/src/EmitInstructionA64.h
     CodeGen/src/EmitInstructionX64.h
     CodeGen/src/Fallbacks.h
     CodeGen/src/FallbacksProlog.h
@@ -129,6 +128,7 @@ target_sources(Luau.CodeGen PRIVATE
     CodeGen/src/IrRegAllocA64.h
     CodeGen/src/IrTranslateBuiltins.h
     CodeGen/src/IrTranslation.h
+    CodeGen/src/IrValueLocationTracking.h
     CodeGen/src/NativeState.h
 )
 
@@ -180,6 +180,7 @@ target_sources(Luau.Analysis PRIVATE
     Analysis/include/Luau/TypeAttach.h
     Analysis/include/Luau/TypeChecker2.h
     Analysis/include/Luau/TypedAllocator.h
+    Analysis/include/Luau/TypeFamily.h
     Analysis/include/Luau/TypeInfer.h
     Analysis/include/Luau/TypePack.h
     Analysis/include/Luau/TypeReduction.h
@@ -230,6 +231,7 @@ target_sources(Luau.Analysis PRIVATE
     Analysis/src/TypeAttach.cpp
     Analysis/src/TypeChecker2.cpp
     Analysis/src/TypedAllocator.cpp
+    Analysis/src/TypeFamily.cpp
     Analysis/src/TypeInfer.cpp
     Analysis/src/TypePack.cpp
     Analysis/src/TypeReduction.cpp
@@ -364,6 +366,7 @@ if(TARGET Luau.UnitTest)
         tests/Frontend.test.cpp
         tests/IrBuilder.test.cpp
         tests/IrCallWrapperX64.test.cpp
+        tests/IrRegAllocX64.test.cpp
         tests/JsonEmitter.test.cpp
         tests/Lexer.test.cpp
         tests/Linter.test.cpp
@@ -381,6 +384,8 @@ if(TARGET Luau.UnitTest)
         tests/TopoSort.test.cpp
         tests/ToString.test.cpp
         tests/Transpiler.test.cpp
+        tests/TxnLog.test.cpp
+        tests/TypeFamily.test.cpp
         tests/TypeInfer.aliases.test.cpp
         tests/TypeInfer.annotations.test.cpp
         tests/TypeInfer.anyerror.test.cpp

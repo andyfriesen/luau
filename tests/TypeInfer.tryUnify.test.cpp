@@ -101,7 +101,7 @@ TEST_CASE_FIXTURE(TryUnifyFixture, "tables_can_be_unified")
         TableType{{{"foo", {arena.freshType(globalScope->level)}}}, std::nullopt, globalScope->level, TableState::Unsealed},
     }};
 
-    CHECK_NE(*getMutable<TableType>(&tableOne)->props["foo"].type, *getMutable<TableType>(&tableTwo)->props["foo"].type);
+    CHECK_NE(*getMutable<TableType>(&tableOne)->props["foo"].type(), *getMutable<TableType>(&tableTwo)->props["foo"].type());
 
     state.tryUnify(&tableTwo, &tableOne);
 
@@ -110,7 +110,7 @@ TEST_CASE_FIXTURE(TryUnifyFixture, "tables_can_be_unified")
 
     state.log.commit();
 
-    CHECK_EQ(*getMutable<TableType>(&tableOne)->props["foo"].type, *getMutable<TableType>(&tableTwo)->props["foo"].type);
+    CHECK_EQ(*getMutable<TableType>(&tableOne)->props["foo"].type(), *getMutable<TableType>(&tableTwo)->props["foo"].type());
 }
 
 TEST_CASE_FIXTURE(TryUnifyFixture, "incompatible_tables_are_preserved")
@@ -129,14 +129,14 @@ TEST_CASE_FIXTURE(TryUnifyFixture, "incompatible_tables_are_preserved")
             TableState::Unsealed},
     }};
 
-    CHECK_NE(*getMutable<TableType>(&tableOne)->props["foo"].type, *getMutable<TableType>(&tableTwo)->props["foo"].type);
+    CHECK_NE(*getMutable<TableType>(&tableOne)->props["foo"].type(), *getMutable<TableType>(&tableTwo)->props["foo"].type());
 
     state.tryUnify(&tableTwo, &tableOne);
 
     CHECK(state.failure);
     CHECK_EQ(1, state.errors.size());
 
-    CHECK_NE(*getMutable<TableType>(&tableOne)->props["foo"].type, *getMutable<TableType>(&tableTwo)->props["foo"].type);
+    CHECK_NE(*getMutable<TableType>(&tableOne)->props["foo"].type(), *getMutable<TableType>(&tableTwo)->props["foo"].type());
 }
 
 TEST_CASE_FIXTURE(TryUnifyFixture, "uninhabited_intersection_sub_never")
@@ -407,6 +407,93 @@ local l0:(any)&(typeof(_)),l0:(any)|(any) = _,_
     )");
 
     LUAU_REQUIRE_ERRORS(result);
+}
+
+static TypeId createTheType(TypeArena& arena, NotNull<BuiltinTypes> builtinTypes, Scope* scope, TypeId freeTy)
+{
+    /*
+    ({|
+        render: (
+            (('a) -> ()) | {| current: 'a |}
+        ) -> nil
+    |}) -> ()
+    */
+    TypePackId emptyPack = arena.addTypePack({});
+
+    return arena.addType(FunctionType{
+        arena.addTypePack({arena.addType(TableType{
+            TableType::Props{{{"render",
+                Property(arena.addType(FunctionType{
+                    arena.addTypePack({arena.addType(UnionType{{arena.addType(FunctionType{arena.addTypePack({freeTy}), emptyPack}),
+                        arena.addType(TableType{TableType::Props{{"current", {freeTy}}}, std::nullopt, TypeLevel{}, scope, TableState::Sealed})}})}),
+                    arena.addTypePack({builtinTypes->nilType})}))}}},
+            std::nullopt, TypeLevel{}, scope, TableState::Sealed})}),
+        emptyPack});
+};
+
+// See CLI-71190
+TEST_CASE_FIXTURE(TryUnifyFixture, "unifying_two_unions_under_dcr_does_not_create_a_BoundType_cycle")
+{
+    const std::shared_ptr<Scope> scope = globalScope;
+    const std::shared_ptr<Scope> nestedScope = std::make_shared<Scope>(scope);
+
+    const TypeId outerType = arena.freshType(scope.get());
+    const TypeId outerType2 = arena.freshType(scope.get());
+
+    const TypeId innerType = arena.freshType(nestedScope.get());
+
+    ScopedFastFlag sff{"DebugLuauDeferredConstraintResolution", true};
+
+    state.enableScopeTests();
+
+    SUBCASE("equal_scopes")
+    {
+        TypeId one = createTheType(arena, builtinTypes, scope.get(), outerType);
+        TypeId two = createTheType(arena, builtinTypes, scope.get(), outerType2);
+
+        state.tryUnify(one, two);
+        state.log.commit();
+
+        ToStringOptions opts;
+
+        CHECK(follow(outerType) == follow(outerType2));
+    }
+
+    SUBCASE("outer_scope_is_subtype")
+    {
+        TypeId one = createTheType(arena, builtinTypes, scope.get(), outerType);
+        TypeId two = createTheType(arena, builtinTypes, scope.get(), innerType);
+
+        state.tryUnify(one, two);
+        state.log.commit();
+
+        ToStringOptions opts;
+
+        CHECK(follow(outerType) == follow(innerType));
+
+        // The scope of outerType exceeds that of innerType.  The latter should be bound to the former.
+        const BoundType* bt = get_if<BoundType>(&innerType->ty);
+        REQUIRE(bt);
+        CHECK(bt->boundTo == outerType);
+    }
+
+    SUBCASE("outer_scope_is_supertype")
+    {
+        TypeId one = createTheType(arena, builtinTypes, scope.get(), innerType);
+        TypeId two = createTheType(arena, builtinTypes, scope.get(), outerType);
+
+        state.tryUnify(one, two);
+        state.log.commit();
+
+        ToStringOptions opts;
+
+        CHECK(follow(outerType) == follow(innerType));
+
+        // The scope of outerType exceeds that of innerType.  The latter should be bound to the former.
+        const BoundType* bt = get_if<BoundType>(&innerType->ty);
+        REQUIRE(bt);
+        CHECK(bt->boundTo == outerType);
+    }
 }
 
 TEST_SUITE_END();

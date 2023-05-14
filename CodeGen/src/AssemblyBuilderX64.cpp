@@ -31,7 +31,8 @@ static_assert(sizeof(setccTextForCondition) / sizeof(setccTextForCondition[0]) =
 #define OP_PLUS_REG(op, reg) ((op) + (reg & 0x7))
 #define OP_PLUS_CC(op, cc) ((op) + uint8_t(cc))
 
-#define REX_W(value) (value ? 0x8 : 0x0)
+#define REX_W_BIT(value) (value ? 0x8 : 0x0)
+#define REX_W(reg) REX_W_BIT((reg).size == SizeX64::qword || ((reg).size == SizeX64::byte && (reg).index >= 4))
 #define REX_R(reg) (((reg).index & 0x8) >> 1)
 #define REX_X(reg) (((reg).index & 0x8) >> 2)
 #define REX_B(reg) (((reg).index & 0x8) >> 3)
@@ -74,6 +75,7 @@ static ABIX64 getCurrentX64ABI()
 AssemblyBuilderX64::AssemblyBuilderX64(bool logText, ABIX64 abi)
     : logText(logText)
     , abi(abi)
+    , constCache64(~0ull)
 {
     data.resize(4096);
     dataPos = data.size(); // data is filled backwards
@@ -141,6 +143,16 @@ void AssemblyBuilderX64::shl(OperandX64 lhs, OperandX64 rhs)
 void AssemblyBuilderX64::shr(OperandX64 lhs, OperandX64 rhs)
 {
     placeShift("shr", lhs, rhs, 5);
+}
+
+void AssemblyBuilderX64::rol(OperandX64 lhs, OperandX64 rhs)
+{
+    placeShift("rol", lhs, rhs, 0);
+}
+
+void AssemblyBuilderX64::ror(OperandX64 lhs, OperandX64 rhs)
+{
+    placeShift("ror", lhs, rhs, 1);
 }
 
 void AssemblyBuilderX64::mov(OperandX64 lhs, OperandX64 rhs)
@@ -460,6 +472,34 @@ void AssemblyBuilderX64::int3()
     commit();
 }
 
+void AssemblyBuilderX64::bsr(RegisterX64 dst, OperandX64 src)
+{
+    if (logText)
+        log("bsr", dst, src);
+
+    LUAU_ASSERT(dst.size == SizeX64::dword || dst.size == SizeX64::qword);
+
+    placeRex(dst, src);
+    place(0x0f);
+    place(0xbd);
+    placeRegAndModRegMem(dst, src);
+    commit();
+}
+
+void AssemblyBuilderX64::bsf(RegisterX64 dst, OperandX64 src)
+{
+    if (logText)
+        log("bsf", dst, src);
+
+    LUAU_ASSERT(dst.size == SizeX64::dword || dst.size == SizeX64::qword);
+
+    placeRex(dst, src);
+    place(0x0f);
+    place(0xbc);
+    placeRegAndModRegMem(dst, src);
+    commit();
+}
+
 void AssemblyBuilderX64::nop(uint32_t length)
 {
     while (length != 0)
@@ -676,6 +716,16 @@ void AssemblyBuilderX64::vcvtsi2sd(OperandX64 dst, OperandX64 src1, OperandX64 s
     placeAvx("vcvtsi2sd", dst, src1, src2, 0x2a, (src2.cat == CategoryX64::reg ? src2.base.size : src2.memSize) == SizeX64::qword, AVX_0F, AVX_F2);
 }
 
+void AssemblyBuilderX64::vcvtsd2ss(OperandX64 dst, OperandX64 src1, OperandX64 src2)
+{
+    if (src2.cat == CategoryX64::reg)
+        LUAU_ASSERT(src2.base.size == SizeX64::xmmword);
+    else
+        LUAU_ASSERT(src2.memSize == SizeX64::qword);
+
+    placeAvx("vcvtsd2ss", dst, src1, src2, 0x5a, (src2.cat == CategoryX64::reg ? src2.base.size : src2.memSize) == SizeX64::qword, AVX_0F, AVX_F2);
+}
+
 void AssemblyBuilderX64::vroundsd(OperandX64 dst, OperandX64 src1, OperandX64 src2, RoundingModeX64 roundingMode)
 {
     placeAvx("vroundsd", dst, src1, src2, uint8_t(roundingMode) | kRoundingPrecisionInexact, 0x0b, false, AVX_0F3A, AVX_66);
@@ -782,7 +832,7 @@ void AssemblyBuilderX64::vblendvpd(RegisterX64 dst, RegisterX64 src1, OperandX64
     placeAvx("vblendvpd", dst, src1, mask, src3.index << 4, 0x4b, false, AVX_0F3A, AVX_66);
 }
 
-void AssemblyBuilderX64::finalize()
+bool AssemblyBuilderX64::finalize()
 {
     code.resize(codePos - code.data());
 
@@ -804,6 +854,8 @@ void AssemblyBuilderX64::finalize()
     data.resize(dataSize);
 
     finalized = true;
+
+    return true;
 }
 
 Label AssemblyBuilderX64::setLabel()
@@ -834,9 +886,22 @@ void AssemblyBuilderX64::setLabel(Label& label)
 
 OperandX64 AssemblyBuilderX64::i64(int64_t value)
 {
+    uint64_t as64BitKey = value;
+
+    if (as64BitKey != ~0ull)
+    {
+        if (int32_t* prev = constCache64.find(as64BitKey))
+            return OperandX64(SizeX64::qword, noreg, 1, rip, *prev);
+    }
+
     size_t pos = allocateData(8, 8);
     writeu64(&data[pos], value);
-    return OperandX64(SizeX64::qword, noreg, 1, rip, int32_t(pos - data.size()));
+    int32_t offset = int32_t(pos - data.size());
+
+    if (as64BitKey != ~0ull)
+        constCache64[as64BitKey] = offset;
+
+    return OperandX64(SizeX64::qword, noreg, 1, rip, offset);
 }
 
 OperandX64 AssemblyBuilderX64::f32(float value)
@@ -848,9 +913,24 @@ OperandX64 AssemblyBuilderX64::f32(float value)
 
 OperandX64 AssemblyBuilderX64::f64(double value)
 {
+    uint64_t as64BitKey;
+    static_assert(sizeof(as64BitKey) == sizeof(value), "Expecting double to be 64-bit");
+    memcpy(&as64BitKey, &value, sizeof(value));
+
+    if (as64BitKey != ~0ull)
+    {
+        if (int32_t* prev = constCache64.find(as64BitKey))
+            return OperandX64(SizeX64::qword, noreg, 1, rip, *prev);
+    }
+
     size_t pos = allocateData(8, 8);
     writef64(&data[pos], value);
-    return OperandX64(SizeX64::qword, noreg, 1, rip, int32_t(pos - data.size()));
+    int32_t offset = int32_t(pos - data.size());
+
+    if (as64BitKey != ~0ull)
+        constCache64[as64BitKey] = offset;
+
+    return OperandX64(SizeX64::qword, noreg, 1, rip, offset);
 }
 
 OperandX64 AssemblyBuilderX64::f32x4(float x, float y, float z, float w)
@@ -1106,7 +1186,7 @@ void AssemblyBuilderX64::placeAvx(
 
 void AssemblyBuilderX64::placeRex(RegisterX64 op)
 {
-    uint8_t code = REX_W(op.size == SizeX64::qword) | REX_B(op);
+    uint8_t code = REX_W(op) | REX_B(op);
 
     if (code != 0)
         place(code | 0x40);
@@ -1117,9 +1197,9 @@ void AssemblyBuilderX64::placeRex(OperandX64 op)
     uint8_t code = 0;
 
     if (op.cat == CategoryX64::reg)
-        code = REX_W(op.base.size == SizeX64::qword) | REX_B(op.base);
+        code = REX_W(op.base) | REX_B(op.base);
     else if (op.cat == CategoryX64::mem)
-        code = REX_W(op.memSize == SizeX64::qword) | REX_X(op.index) | REX_B(op.base);
+        code = REX_W_BIT(op.memSize == SizeX64::qword) | REX_X(op.index) | REX_B(op.base);
     else
         LUAU_ASSERT(!"No encoding for left operand of this category");
 
@@ -1144,7 +1224,7 @@ void AssemblyBuilderX64::placeRexNoW(OperandX64 op)
 
 void AssemblyBuilderX64::placeRex(RegisterX64 lhs, OperandX64 rhs)
 {
-    uint8_t code = REX_W(lhs.size == SizeX64::qword);
+    uint8_t code = REX_W(lhs);
 
     if (rhs.cat == CategoryX64::imm)
         code |= REX_B(lhs);

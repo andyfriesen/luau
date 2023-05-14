@@ -30,7 +30,7 @@ void IrBuilder::buildFunctionIr(Proto* proto)
     // Rebuild original control flow blocks
     rebuildBytecodeBasicBlocks(proto);
 
-    function.bcMapping.resize(proto->sizecode, {~0u, 0});
+    function.bcMapping.resize(proto->sizecode, {~0u, ~0u});
 
     // Translate all instructions to IR inside blocks
     for (int i = 0; i < proto->sizecode;)
@@ -41,7 +41,7 @@ void IrBuilder::buildFunctionIr(Proto* proto)
         int nexti = i + getOpLength(op);
         LUAU_ASSERT(nexti <= proto->sizecode);
 
-        function.bcMapping[i] = {uint32_t(function.instructions.size()), 0};
+        function.bcMapping[i] = {uint32_t(function.instructions.size()), ~0u};
 
         // Begin new block at this instruction if it was in the bytecode or requested during translation
         if (instIndexToBlock[i] != kNoAssociatedBlockIndex)
@@ -293,7 +293,7 @@ void IrBuilder::translateInst(LuauOpcode op, const Instruction* pc, int i)
         int skip = LUAU_INSN_C(*pc);
         IrOp next = blockAtInst(i + skip + 2);
 
-        translateFastCallN(*this, pc, i, true, 1, constBool(false), next);
+        translateFastCallN(*this, pc, i, true, 1, undef(), next);
 
         activeFastcallFallback = true;
         fastcallFallbackReturn = next;
@@ -364,16 +364,16 @@ void IrBuilder::translateInst(LuauOpcode op, const Instruction* pc, int i)
         translateInstForGPrepInext(*this, pc, i);
         break;
     case LOP_AND:
-        inst(IrCmd::AND, vmReg(LUAU_INSN_A(*pc)), vmReg(LUAU_INSN_B(*pc)), vmReg(LUAU_INSN_C(*pc)));
+        translateInstAndX(*this, pc, i, vmReg(LUAU_INSN_C(*pc)));
         break;
     case LOP_ANDK:
-        inst(IrCmd::ANDK, vmReg(LUAU_INSN_A(*pc)), vmReg(LUAU_INSN_B(*pc)), vmConst(LUAU_INSN_C(*pc)));
+        translateInstAndX(*this, pc, i, vmConst(LUAU_INSN_C(*pc)));
         break;
     case LOP_OR:
-        inst(IrCmd::OR, vmReg(LUAU_INSN_A(*pc)), vmReg(LUAU_INSN_B(*pc)), vmReg(LUAU_INSN_C(*pc)));
+        translateInstOrX(*this, pc, i, vmReg(LUAU_INSN_C(*pc)));
         break;
     case LOP_ORK:
-        inst(IrCmd::ORK, vmReg(LUAU_INSN_A(*pc)), vmReg(LUAU_INSN_B(*pc)), vmConst(LUAU_INSN_C(*pc)));
+        translateInstOrX(*this, pc, i, vmConst(LUAU_INSN_C(*pc)));
         break;
     case LOP_COVERAGE:
         inst(IrCmd::COVERAGE, constUint(i));
@@ -494,6 +494,11 @@ void IrBuilder::clone(const IrBlock& source, bool removeCurrentTerminator)
         // Reconstruct the fresh clone
         inst(clone.cmd, clone.a, clone.b, clone.c, clone.d, clone.e, clone.f);
     }
+}
+
+IrOp IrBuilder::undef()
+{
+    return {IrOpKind::Undef, 0};
 }
 
 IrOp IrBuilder::constBool(bool value)

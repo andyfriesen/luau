@@ -8,7 +8,6 @@
 #include "doctest.h"
 
 LUAU_FASTFLAG(DebugLuauDeferredConstraintResolution)
-LUAU_FASTFLAG(LuauNegatedClassTypes)
 
 using namespace Luau;
 
@@ -64,7 +63,7 @@ struct RefinementClassFixture : BuiltinsFixture
         TypeArena& arena = frontend.globals.globalTypes;
         NotNull<Scope> scope{frontend.globals.globalScope.get()};
 
-        std::optional<TypeId> rootSuper = FFlag::LuauNegatedClassTypes ? std::make_optional(builtinTypes->classType) : std::nullopt;
+        std::optional<TypeId> rootSuper = std::make_optional(builtinTypes->classType);
 
         unfreeze(arena);
         TypeId vec3 = arena.addType(ClassType{"Vector3", {}, rootSuper, std::nullopt, {}, nullptr, "Test"});
@@ -1747,6 +1746,38 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "type_annotations_arent_relevant_when_doing_d
         CHECK_EQ("never", toString(requireTypeAtPosition({9, 28})));
     else
         CHECK_EQ("nil", toString(requireTypeAtPosition({9, 28})));
+}
+
+TEST_CASE_FIXTURE(BuiltinsFixture, "function_call_with_colon_after_refining_not_to_be_nil")
+{
+    ScopedFastFlag sff{"DebugLuauDeferredConstraintResolution", true};
+
+    CheckResult result = check(R"(
+        --!strict
+        export type Observer<T> = {
+            complete: ((self: Observer<T>) -> ())?,
+        }
+
+        local function _f(handler: Observer<any>)
+            assert(handler.complete ~= nil)
+            handler:complete() -- incorrectly gives Value of type '((Observer<any>) -> ())?' could be nil
+            handler.complete(handler) -- works fine, both forms should avoid the error
+        end
+    )");
+
+    LUAU_REQUIRE_NO_ERRORS(result);
+}
+
+TEST_CASE_FIXTURE(Fixture, "refinements_should_not_affect_assignment")
+{
+    CheckResult result = check(R"(
+        local a: unknown = true
+        if a == true then
+            a = 'not even remotely similar to a boolean'
+        end
+    )");
+
+    LUAU_REQUIRE_NO_ERRORS(result);
 }
 
 TEST_SUITE_END();

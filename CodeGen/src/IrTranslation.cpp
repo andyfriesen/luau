@@ -65,21 +65,42 @@ void translateInstLoadN(IrBuilder& build, const Instruction* pc)
     build.inst(IrCmd::STORE_TAG, build.vmReg(ra), build.constTag(LUA_TNUMBER));
 }
 
+static void translateInstLoadConstant(IrBuilder& build, int ra, int k)
+{
+    TValue protok = build.function.proto->k[k];
+
+    // Compiler only generates LOADK for source-level constants, so dynamic imports are not affected
+    if (protok.tt == LUA_TNIL)
+    {
+        build.inst(IrCmd::STORE_TAG, build.vmReg(ra), build.constTag(LUA_TNIL));
+    }
+    else if (protok.tt == LUA_TBOOLEAN)
+    {
+        build.inst(IrCmd::STORE_INT, build.vmReg(ra), build.constInt(protok.value.b));
+        build.inst(IrCmd::STORE_TAG, build.vmReg(ra), build.constTag(LUA_TBOOLEAN));
+    }
+    else if (protok.tt == LUA_TNUMBER)
+    {
+        build.inst(IrCmd::STORE_DOUBLE, build.vmReg(ra), build.constDouble(protok.value.n));
+        build.inst(IrCmd::STORE_TAG, build.vmReg(ra), build.constTag(LUA_TNUMBER));
+    }
+    else
+    {
+        // Remaining tag here right now is LUA_TSTRING, while it can be transformed to LOAD_POINTER/STORE_POINTER/STORE_TAG, it's not profitable right
+        // now
+        IrOp load = build.inst(IrCmd::LOAD_TVALUE, build.vmConst(k));
+        build.inst(IrCmd::STORE_TVALUE, build.vmReg(ra), load);
+    }
+}
+
 void translateInstLoadK(IrBuilder& build, const Instruction* pc)
 {
-    int ra = LUAU_INSN_A(*pc);
-
-    IrOp load = build.inst(IrCmd::LOAD_TVALUE, build.vmConst(LUAU_INSN_D(*pc)));
-    build.inst(IrCmd::STORE_TVALUE, build.vmReg(ra), load);
+    translateInstLoadConstant(build, LUAU_INSN_A(*pc), LUAU_INSN_D(*pc));
 }
 
 void translateInstLoadKX(IrBuilder& build, const Instruction* pc)
 {
-    int ra = LUAU_INSN_A(*pc);
-    uint32_t aux = pc[1];
-
-    IrOp load = build.inst(IrCmd::LOAD_TVALUE, build.vmConst(aux));
-    build.inst(IrCmd::STORE_TVALUE, build.vmReg(ra), load);
+    translateInstLoadConstant(build, LUAU_INSN_A(*pc), pc[1]);
 }
 
 void translateInstMove(IrBuilder& build, const Instruction* pc)
@@ -301,7 +322,7 @@ static void translateInstBinaryNumeric(IrBuilder& build, int ra, int rb, int rc,
     if (opc.kind == IrOpKind::VmConst)
     {
         LUAU_ASSERT(build.function.proto);
-        TValue protok = build.function.proto->k[opc.index];
+        TValue protok = build.function.proto->k[vmConstOp(opc)];
 
         LUAU_ASSERT(protok.tt == LUA_TNUMBER);
 
@@ -342,7 +363,7 @@ static void translateInstBinaryNumeric(IrBuilder& build, int ra, int rb, int rc,
             result = build.inst(IrCmd::MOD_NUM, vb, vc);
             break;
         case TM_POW:
-            result = build.inst(IrCmd::POW_NUM, vb, vc);
+            result = build.inst(IrCmd::INVOKE_LIBM, build.constUint(LBF_MATH_POW), vb, vc);
             break;
         default:
             LUAU_ASSERT(!"unsupported binary op");
@@ -498,8 +519,6 @@ void translateFastCallN(IrBuilder& build, const Instruction* pc, int pcpos, bool
     int bfid = LUAU_INSN_A(*pc);
     int skip = LUAU_INSN_C(*pc);
 
-    IrOp fallback = build.block(IrBlockKind::Fallback);
-
     Instruction call = pc[skip + 1];
     LUAU_ASSERT(LUAU_INSN_OP(call) == LOP_CALL);
     int ra = LUAU_INSN_A(call);
@@ -509,9 +528,21 @@ void translateFastCallN(IrBuilder& build, const Instruction* pc, int pcpos, bool
     int arg = customParams ? LUAU_INSN_B(*pc) : ra + 1;
     IrOp args = customParams ? customArgs : build.vmReg(ra + 2);
 
+    IrOp builtinArgs = args;
+
+    if (customArgs.kind == IrOpKind::VmConst)
+    {
+        TValue protok = build.function.proto->k[customArgs.index];
+
+        if (protok.tt == LUA_TNUMBER)
+            builtinArgs = build.constDouble(protok.value.n);
+    }
+
+    IrOp fallback = build.block(IrBlockKind::Fallback);
+
     build.inst(IrCmd::CHECK_SAFE_ENV, fallback);
 
-    BuiltinImplResult br = translateBuiltin(build, LuauBuiltinFunction(bfid), ra, arg, args, nparams, nresults, fallback);
+    BuiltinImplResult br = translateBuiltin(build, LuauBuiltinFunction(bfid), ra, arg, builtinArgs, nparams, nresults, fallback);
 
     if (br.type == BuiltinImplType::UsesFallback)
     {
@@ -1106,6 +1137,72 @@ void translateInstNamecall(IrBuilder& build, const Instruction* pc, int pcpos)
     build.inst(IrCmd::JUMP, next);
 
     build.beginBlock(next);
+}
+
+void translateInstAndX(IrBuilder& build, const Instruction* pc, int pcpos, IrOp c)
+{
+    int ra = LUAU_INSN_A(*pc);
+    int rb = LUAU_INSN_B(*pc);
+
+    IrOp fallthrough = build.block(IrBlockKind::Internal);
+    IrOp next = build.blockAtInst(pcpos + 1);
+
+    IrOp target = (ra == rb) ? next : build.block(IrBlockKind::Internal);
+
+    build.inst(IrCmd::JUMP_IF_FALSY, build.vmReg(rb), target, fallthrough);
+    build.beginBlock(fallthrough);
+
+    IrOp load = build.inst(IrCmd::LOAD_TVALUE, c);
+    build.inst(IrCmd::STORE_TVALUE, build.vmReg(ra), load);
+    build.inst(IrCmd::JUMP, next);
+
+    if (ra == rb)
+    {
+        build.beginBlock(next);
+    }
+    else
+    {
+        build.beginBlock(target);
+
+        IrOp load1 = build.inst(IrCmd::LOAD_TVALUE, build.vmReg(rb));
+        build.inst(IrCmd::STORE_TVALUE, build.vmReg(ra), load1);
+        build.inst(IrCmd::JUMP, next);
+
+        build.beginBlock(next);
+    }
+}
+
+void translateInstOrX(IrBuilder& build, const Instruction* pc, int pcpos, IrOp c)
+{
+    int ra = LUAU_INSN_A(*pc);
+    int rb = LUAU_INSN_B(*pc);
+
+    IrOp fallthrough = build.block(IrBlockKind::Internal);
+    IrOp next = build.blockAtInst(pcpos + 1);
+
+    IrOp target = (ra == rb) ? next : build.block(IrBlockKind::Internal);
+
+    build.inst(IrCmd::JUMP_IF_TRUTHY, build.vmReg(rb), target, fallthrough);
+    build.beginBlock(fallthrough);
+
+    IrOp load = build.inst(IrCmd::LOAD_TVALUE, c);
+    build.inst(IrCmd::STORE_TVALUE, build.vmReg(ra), load);
+    build.inst(IrCmd::JUMP, next);
+
+    if (ra == rb)
+    {
+        build.beginBlock(next);
+    }
+    else
+    {
+        build.beginBlock(target);
+
+        IrOp load1 = build.inst(IrCmd::LOAD_TVALUE, build.vmReg(rb));
+        build.inst(IrCmd::STORE_TVALUE, build.vmReg(ra), load1);
+        build.inst(IrCmd::JUMP, next);
+
+        build.beginBlock(next);
+    }
 }
 
 } // namespace CodeGen

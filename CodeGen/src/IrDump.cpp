@@ -62,6 +62,7 @@ static const char* getTagName(uint8_t tag)
     case LUA_TTHREAD:
         return "tthread";
     default:
+        LUAU_ASSERT(!"Unknown type tag");
         LUAU_UNREACHABLE();
     }
 }
@@ -100,6 +101,8 @@ const char* getCmdName(IrCmd cmd)
         return "STORE_DOUBLE";
     case IrCmd::STORE_INT:
         return "STORE_INT";
+    case IrCmd::STORE_VECTOR:
+        return "STORE_VECTOR";
     case IrCmd::STORE_TVALUE:
         return "STORE_TVALUE";
     case IrCmd::STORE_NODE_VALUE_TV:
@@ -118,8 +121,6 @@ const char* getCmdName(IrCmd cmd)
         return "DIV_NUM";
     case IrCmd::MOD_NUM:
         return "MOD_NUM";
-    case IrCmd::POW_NUM:
-        return "POW_NUM";
     case IrCmd::MIN_NUM:
         return "MIN_NUM";
     case IrCmd::MAX_NUM:
@@ -148,6 +149,10 @@ const char* getCmdName(IrCmd cmd)
         return "JUMP_EQ_TAG";
     case IrCmd::JUMP_EQ_INT:
         return "JUMP_EQ_INT";
+    case IrCmd::JUMP_LT_INT:
+        return "JUMP_LT_INT";
+    case IrCmd::JUMP_GE_UINT:
+        return "JUMP_GE_UINT";
     case IrCmd::JUMP_EQ_POINTER:
         return "JUMP_EQ_POINTER";
     case IrCmd::JUMP_CMP_NUM:
@@ -168,6 +173,12 @@ const char* getCmdName(IrCmd cmd)
         return "TRY_CALL_FASTGETTM";
     case IrCmd::INT_TO_NUM:
         return "INT_TO_NUM";
+    case IrCmd::UINT_TO_NUM:
+        return "UINT_TO_NUM";
+    case IrCmd::NUM_TO_INT:
+        return "NUM_TO_INT";
+    case IrCmd::NUM_TO_UINT:
+        return "NUM_TO_UINT";
     case IrCmd::ADJUST_STACK_TO_REG:
         return "ADJUST_STACK_TO_REG";
     case IrCmd::ADJUST_STACK_TO_TOP:
@@ -238,14 +249,6 @@ const char* getCmdName(IrCmd cmd)
         return "FORGLOOP_FALLBACK";
     case IrCmd::FORGPREP_XNEXT_FALLBACK:
         return "FORGPREP_XNEXT_FALLBACK";
-    case IrCmd::AND:
-        return "AND";
-    case IrCmd::ANDK:
-        return "ANDK";
-    case IrCmd::OR:
-        return "OR";
-    case IrCmd::ORK:
-        return "ORK";
     case IrCmd::COVERAGE:
         return "COVERAGE";
     case IrCmd::FALLBACK_GETGLOBAL:
@@ -270,6 +273,30 @@ const char* getCmdName(IrCmd cmd)
         return "FALLBACK_FORGPREP";
     case IrCmd::SUBSTITUTE:
         return "SUBSTITUTE";
+    case IrCmd::BITAND_UINT:
+        return "BITAND_UINT";
+    case IrCmd::BITXOR_UINT:
+        return "BITXOR_UINT";
+    case IrCmd::BITOR_UINT:
+        return "BITOR_UINT";
+    case IrCmd::BITNOT_UINT:
+        return "BITNOT_UINT";
+    case IrCmd::BITLSHIFT_UINT:
+        return "BITLSHIFT_UINT";
+    case IrCmd::BITRSHIFT_UINT:
+        return "BITRSHIFT_UINT";
+    case IrCmd::BITARSHIFT_UINT:
+        return "BITARSHIFT_UINT";
+    case IrCmd::BITLROTATE_UINT:
+        return "BITLROTATE_UINT";
+    case IrCmd::BITRROTATE_UINT:
+        return "BITRROTATE_UINT";
+    case IrCmd::BITCOUNTLZ_UINT:
+        return "BITCOUNTLZ_UINT";
+    case IrCmd::BITCOUNTRZ_UINT:
+        return "BITCOUNTRZ_UINT";
+    case IrCmd::INVOKE_LIBM:
+        return "INVOKE_LIBM";
     }
 
     LUAU_UNREACHABLE();
@@ -331,6 +358,9 @@ void toString(IrToStringContext& ctx, IrOp op)
     {
     case IrOpKind::None:
         break;
+    case IrOpKind::Undef:
+        append(ctx.result, "undef");
+        break;
     case IrOpKind::Constant:
         toString(ctx.result, ctx.constants[op.index]);
         break;
@@ -345,13 +375,13 @@ void toString(IrToStringContext& ctx, IrOp op)
         append(ctx.result, "%s_%u", getBlockKindName(ctx.blocks[op.index].kind), op.index);
         break;
     case IrOpKind::VmReg:
-        append(ctx.result, "R%u", op.index);
+        append(ctx.result, "R%d", vmRegOp(op));
         break;
     case IrOpKind::VmConst:
-        append(ctx.result, "K%u", op.index);
+        append(ctx.result, "K%d", vmConstOp(op));
         break;
     case IrOpKind::VmUpvalue:
-        append(ctx.result, "U%u", op.index);
+        append(ctx.result, "U%d", vmUpvalueOp(op));
         break;
     }
 }
@@ -370,32 +400,14 @@ void toString(std::string& result, IrConst constant)
         append(result, "%uu", constant.valueUint);
         break;
     case IrConstKind::Double:
-        append(result, "%.17g", constant.valueDouble);
+        if (constant.valueDouble != constant.valueDouble)
+            append(result, "nan");
+        else
+            append(result, "%.17g", constant.valueDouble);
         break;
     case IrConstKind::Tag:
         result.append(getTagName(constant.valueTag));
         break;
-    }
-}
-
-void toStringDetailed(IrToStringContext& ctx, const IrInst& inst, uint32_t index, bool includeUseInfo)
-{
-    size_t start = ctx.result.size();
-
-    toString(ctx, inst, index);
-
-    if (includeUseInfo)
-    {
-        padToDetailColumn(ctx.result, start);
-
-        if (inst.useCount == 0 && hasSideEffects(inst.cmd))
-            append(ctx.result, "; %%%u, has side-effects\n", index);
-        else
-            append(ctx.result, "; useCount: %d, lastUse: %%%u\n", inst.useCount, inst.lastUse);
-    }
-    else
-    {
-        ctx.result.append("\n");
     }
 }
 
@@ -435,6 +447,86 @@ static void appendRegisterSet(IrToStringContext& ctx, const RegisterSet& rs, con
             ctx.result.append(separator);
 
         append(ctx.result, "R%d...", rs.varargStart);
+    }
+}
+
+static RegisterSet getJumpTargetExtraLiveIn(IrToStringContext& ctx, const IrBlock& block, uint32_t blockIdx, const IrInst& inst)
+{
+    RegisterSet extraRs;
+
+    if (blockIdx >= ctx.cfg.in.size())
+        return extraRs;
+
+    const RegisterSet& defRs = ctx.cfg.in[blockIdx];
+
+    // Find first block argument, for guard instructions (isNonTerminatingJump), that's the first and only one
+    LUAU_ASSERT(isNonTerminatingJump(inst.cmd));
+    IrOp op = inst.a;
+
+    if (inst.b.kind == IrOpKind::Block)
+        op = inst.b;
+    else if (inst.c.kind == IrOpKind::Block)
+        op = inst.c;
+    else if (inst.d.kind == IrOpKind::Block)
+        op = inst.d;
+    else if (inst.e.kind == IrOpKind::Block)
+        op = inst.e;
+    else if (inst.f.kind == IrOpKind::Block)
+        op = inst.f;
+
+    if (op.kind == IrOpKind::Block && op.index < ctx.cfg.in.size())
+    {
+        const RegisterSet& inRs = ctx.cfg.in[op.index];
+
+        extraRs.regs = inRs.regs & ~defRs.regs;
+
+        if (inRs.varargSeq)
+            requireVariadicSequence(extraRs, defRs, inRs.varargStart);
+    }
+
+    return extraRs;
+}
+
+void toStringDetailed(IrToStringContext& ctx, const IrBlock& block, uint32_t blockIdx, const IrInst& inst, uint32_t instIdx, bool includeUseInfo)
+{
+    size_t start = ctx.result.size();
+
+    toString(ctx, inst, instIdx);
+
+    if (includeUseInfo)
+    {
+        padToDetailColumn(ctx.result, start);
+
+        if (inst.useCount == 0 && hasSideEffects(inst.cmd))
+        {
+            if (isNonTerminatingJump(inst.cmd))
+            {
+                RegisterSet extraRs = getJumpTargetExtraLiveIn(ctx, block, blockIdx, inst);
+
+                if (extraRs.regs.any() || extraRs.varargSeq)
+                {
+                    append(ctx.result, "; %%%u, extra in: ", instIdx);
+                    appendRegisterSet(ctx, extraRs, ", ");
+                    ctx.result.append("\n");
+                }
+                else
+                {
+                    append(ctx.result, "; %%%u\n", instIdx);
+                }
+            }
+            else
+            {
+                append(ctx.result, "; %%%u\n", instIdx);
+            }
+        }
+        else
+        {
+            append(ctx.result, "; useCount: %d, lastUse: %%%u\n", inst.useCount, inst.lastUse);
+        }
+    }
+    else
+    {
+        ctx.result.append("\n");
     }
 }
 
@@ -549,7 +641,7 @@ std::string toString(const IrFunction& function, bool includeUseInfo)
                 continue;
 
             append(ctx.result, " ");
-            toStringDetailed(ctx, inst, index, includeUseInfo);
+            toStringDetailed(ctx, block, uint32_t(i), inst, index, includeUseInfo);
         }
 
         append(ctx.result, "\n");

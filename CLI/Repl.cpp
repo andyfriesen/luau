@@ -8,6 +8,7 @@
 #include "Luau/Compiler.h"
 #include "Luau/BytecodeBuilder.h"
 #include "Luau/Parser.h"
+#include "Luau/TimeTrace.h"
 
 #include "Coverage.h"
 #include "FileUtils.h"
@@ -24,6 +25,10 @@
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#endif
+
+#ifdef __linux__
+#include <unistd.h>
 #endif
 
 #ifdef CALLGRIND
@@ -702,16 +707,34 @@ struct CompileStats
     size_t lines;
     size_t bytecode;
     size_t codegen;
+
+    double readTime;
+    double miscTime;
+    double parseTime;
+    double compileTime;
+    double codegenTime;
 };
+
+static double recordDeltaTime(double& timer)
+{
+    double now = Luau::TimeTrace::getClock();
+    double delta = now - timer;
+    timer = now;
+    return delta;
+}
 
 static bool compileFile(const char* name, CompileFormat format, CompileStats& stats)
 {
+    double currts = Luau::TimeTrace::getClock();
+
     std::optional<std::string> source = readFile(name);
     if (!source)
     {
         fprintf(stderr, "Error opening %s\n", name);
         return false;
     }
+
+    stats.readTime += recordDeltaTime(currts);
 
     // NOTE: Normally, you should use Luau::compile or luau_compile (see lua_require as an example)
     // This function is much more complicated because it supports many output human-readable formats through internal interfaces
@@ -752,6 +775,8 @@ static bool compileFile(const char* name, CompileFormat format, CompileStats& st
             bcb.setDumpSource(*source);
         }
 
+        stats.miscTime += recordDeltaTime(currts);
+
         Luau::Allocator allocator;
         Luau::AstNameTable names(allocator);
         Luau::ParseResult result = Luau::Parser::parse(source->c_str(), source->size(), names, allocator);
@@ -760,9 +785,11 @@ static bool compileFile(const char* name, CompileFormat format, CompileStats& st
             throw Luau::ParseErrors(result.errors);
 
         stats.lines += result.lines;
+        stats.parseTime += recordDeltaTime(currts);
 
         Luau::compileOrThrow(bcb, result, names, copts());
         stats.bytecode += bcb.getBytecode().size();
+        stats.compileTime += recordDeltaTime(currts);
 
         switch (format)
         {
@@ -783,6 +810,7 @@ static bool compileFile(const char* name, CompileFormat format, CompileStats& st
             break;
         case CompileFormat::CodegenNull:
             stats.codegen += getCodegenAssembly(name, bcb.getBytecode(), options).size();
+            stats.codegenTime += recordDeltaTime(currts);
             break;
         case CompileFormat::Null:
             break;
@@ -841,6 +869,7 @@ int replMain(int argc, char** argv)
     int profile = 0;
     bool coverage = false;
     bool interactive = false;
+    bool codegenPerf = false;
 
     // Set the mode if the user has explicitly specified one.
     int argStart = 1;
@@ -938,6 +967,11 @@ int replMain(int argc, char** argv)
         {
             codegen = true;
         }
+        else if (strcmp(argv[i], "--codegen-perf") == 0)
+        {
+            codegen = true;
+            codegenPerf = true;
+        }
         else if (strcmp(argv[i], "--coverage") == 0)
         {
             coverage = true;
@@ -974,6 +1008,24 @@ int replMain(int argc, char** argv)
     }
 #endif
 
+    if (codegenPerf)
+    {
+#if __linux__
+        char path[128];
+        snprintf(path, sizeof(path), "/tmp/perf-%d.map", getpid());
+
+        // note, there's no need to close the log explicitly as it will be closed when the process exits
+        FILE* codegenPerfLog = fopen(path, "w");
+
+        Luau::CodeGen::setPerfLog(codegenPerfLog, [](void* context, uintptr_t addr, unsigned size, const char* symbol) {
+            fprintf(static_cast<FILE*>(context), "%016lx %08x %s\n", long(addr), size, symbol);
+        });
+#else
+        fprintf(stderr, "--codegen-perf option is only supported on Linux\n");
+        return 1;
+#endif
+    }
+
     const std::vector<std::string> files = getSourceFiles(argc, argv);
     if (mode == CliMode::Unknown)
     {
@@ -1002,10 +1054,13 @@ int replMain(int argc, char** argv)
             failed += !compileFile(path.c_str(), compileFormat, stats);
 
         if (compileFormat == CompileFormat::Null)
-            printf("Compiled %d KLOC into %d KB bytecode\n", int(stats.lines / 1000), int(stats.bytecode / 1024));
+            printf("Compiled %d KLOC into %d KB bytecode (read %.2fs, parse %.2fs, compile %.2fs)\n", int(stats.lines / 1000),
+                int(stats.bytecode / 1024), stats.readTime, stats.parseTime, stats.compileTime);
         else if (compileFormat == CompileFormat::CodegenNull)
-            printf("Compiled %d KLOC into %d KB bytecode => %d KB native code\n", int(stats.lines / 1000), int(stats.bytecode / 1024),
-                int(stats.codegen / 1024));
+            printf("Compiled %d KLOC into %d KB bytecode => %d KB native code (%.2fx) (read %.2fs, parse %.2fs, compile %.2fs, codegen %.2fs)\n",
+                int(stats.lines / 1000), int(stats.bytecode / 1024), int(stats.codegen / 1024),
+                stats.bytecode == 0 ? 0.0 : double(stats.codegen) / double(stats.bytecode), stats.readTime, stats.parseTime, stats.compileTime,
+                stats.codegenTime);
 
         return failed ? 1 : 0;
     }

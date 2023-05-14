@@ -2,6 +2,7 @@
 #pragma once
 
 #include "Luau/Common.h"
+#include "Luau/DenseHash.h"
 #include "Luau/Label.h"
 #include "Luau/ConditionX64.h"
 #include "Luau/OperandX64.h"
@@ -58,6 +59,8 @@ public:
     void sar(OperandX64 lhs, OperandX64 rhs);
     void shl(OperandX64 lhs, OperandX64 rhs);
     void shr(OperandX64 lhs, OperandX64 rhs);
+    void rol(OperandX64 lhs, OperandX64 rhs);
+    void ror(OperandX64 lhs, OperandX64 rhs);
 
     // Two operand mov instruction has additional specialized encodings
     void mov(OperandX64 lhs, OperandX64 rhs);
@@ -97,6 +100,9 @@ public:
 
     void int3();
 
+    void bsr(RegisterX64 dst, OperandX64 src);
+    void bsf(RegisterX64 dst, OperandX64 src);
+
     // Code alignment
     void nop(uint32_t length = 1);
     void align(uint32_t alignment, AlignmentDataX64 data = AlignmentDataX64::Nop);
@@ -121,6 +127,7 @@ public:
 
     void vcvttsd2si(OperandX64 dst, OperandX64 src);
     void vcvtsi2sd(OperandX64 dst, OperandX64 src1, OperandX64 src2);
+    void vcvtsd2ss(OperandX64 dst, OperandX64 src1, OperandX64 src2);
 
     void vroundsd(OperandX64 dst, OperandX64 src1, OperandX64 src2, RoundingModeX64 roundingMode); // inexact
 
@@ -148,7 +155,7 @@ public:
 
 
     // Run final checks
-    void finalize();
+    bool finalize();
 
     // Places a label at current location and returns it
     Label setLabel();
@@ -243,6 +250,8 @@ private:
     uint32_t nextLabel = 1;
     std::vector<Label> pendingLabels;
     std::vector<uint32_t> labelLocations;
+
+    DenseHashMap<uint64_t, int32_t> constCache64;
 
     bool finalized = false;
 

@@ -13,8 +13,6 @@
 #include <unordered_set>
 #include <utility>
 
-LUAU_FASTFLAGVARIABLE(LuauAutocompleteSkipNormalization, false);
-
 static const std::unordered_set<std::string> kStatementStartingKeywords = {
     "while", "if", "local", "repeat", "function", "do", "for", "return", "break", "continue", "type", "export"};
 
@@ -143,12 +141,9 @@ static bool checkTypeMatch(TypeId subTy, TypeId superTy, NotNull<Scope> scope, T
     Normalizer normalizer{typeArena, builtinTypes, NotNull{&unifierState}};
     Unifier unifier(NotNull<Normalizer>{&normalizer}, Mode::Strict, scope, Location(), Variance::Covariant);
 
-    if (FFlag::LuauAutocompleteSkipNormalization)
-    {
-        // Cost of normalization can be too high for autocomplete response time requirements
-        unifier.normalize = false;
-        unifier.checkInhabited = false;
-    }
+    // Cost of normalization can be too high for autocomplete response time requirements
+    unifier.normalize = false;
+    unifier.checkInhabited = false;
 
     return unifier.canUnify(subTy, superTy).empty();
 }
@@ -265,7 +260,7 @@ static void autocompleteProps(const Module& module, TypeArena* typeArena, NotNul
             // already populated, it takes precedence over the property we found just now.
             if (result.count(name) == 0 && name != kParseNameError)
             {
-                Luau::TypeId type = Luau::follow(prop.type);
+                Luau::TypeId type = Luau::follow(prop.type());
                 TypeCorrectKind typeCorrect = indexType == PropIndexType::Key
                                                   ? TypeCorrectKind::Correct
                                                   : checkTypeCorrectKind(module, typeArena, builtinTypes, nodes.back(), {{}, {}}, type);
@@ -292,7 +287,7 @@ static void autocompleteProps(const Module& module, TypeArena* typeArena, NotNul
         auto indexIt = mtable->props.find("__index");
         if (indexIt != mtable->props.end())
         {
-            TypeId followed = follow(indexIt->second.type);
+            TypeId followed = follow(indexIt->second.type());
             if (get<TableType>(followed) || get<MetatableType>(followed))
             {
                 autocompleteProps(module, typeArena, builtinTypes, rootTy, followed, indexType, nodes, result, seen);
