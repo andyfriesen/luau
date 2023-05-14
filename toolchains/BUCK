@@ -25,11 +25,21 @@ cxx_flags = select({
     ],
     "config//os:windows": [
         "/D_CRT_SECURE_NO_WARNINGS", # We need to use the portable CRT functions
-        "/we4018", # Signed/unsigned mismatch
-        "/we4388", # Also signed/unsigned mismatch
-        "/wx",
         "/std:c++17",
         "/EHsc",
+
+        # I have no idea what any of these do
+        "/W3",
+        "/WX",
+        "/we4018", # Signed/unsigned mismatch
+        "/we4388", # Also signed/unsigned mismatch
+        "/Zc:wchar_t",
+        "/O2",
+        "/fp:precise",
+        "/Gd",
+        "/GS",
+        "/MD",
+        "/Zc:inline",
     ]
 })
 
