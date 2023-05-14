@@ -2,7 +2,7 @@
 # FIXME: Preprocessor definitions?
 
 cxx_library(
-    name="Luau.Common",
+    name="common",
     headers=glob(["Common/include/**/*.h"]),
     public_include_directories=["Common/include"],
     header_namespace="Luau",
@@ -10,53 +10,119 @@ cxx_library(
 )
 
 cxx_library(
-    name="Luau.Analysis",
+    name="analysis",
     srcs=glob(["Analysis/src/*.cpp"]),
     headers=glob(["Analysis/include/**/*.h"]),
     public_include_directories=["Analysis/include"],
-    deps=[":Luau.Common", ":Luau.Ast"],
+    deps=[":common", ":ast"],
     visibility=["PUBLIC"],
 )
 
 cxx_library(
-    name="Luau.Ast",
+    name="ast",
     srcs=glob(["Ast/src/*.cpp"]),
     headers=glob(["Ast/include/**/*.h"]),
     public_include_directories=["Ast/include"],
     visibility=["PUBLIC"],
-    deps=[":Luau.Common"],
+    deps=[":common"],
 )
 
+lvmexecute_compiler_flags = select({
+    "DEFAULT": None,
+
+    # disable partial redundancy elimination which regresses interpreter codegen substantially in VS2022:
+    # https://developercommunity.visualstudio.com/t/performance-regression-on-a-complex-interpreter-lo/1631863
+    "config//os:windows": ["/d2ssa-pre-"],
+})
+
+# FIXME This is a pretty awkward way have to say this: We have one random source file that needs an extra compiler option on Windows.
 cxx_library(
-    name="Luau.VM",
-    srcs=glob(["VM/src/*.cpp"]),
-    headers=glob(["VM/include/**/*.h"]),
+    name="lvmexecute",
+    srcs=["VM/src/lvmexecute.cpp"],
     # VM/src most certainly should not be public here
     public_include_directories=["VM/include", "VM/src"],
-    visibility=["PUBLIC"],
-    deps=[":Luau.Common"],
+    deps=[":common"],
+    compiler_flags=lvmexecute_compiler_flags,
 )
 
 cxx_library(
-    name="Luau.Compiler",
+    name="vm",
+    headers=[
+        "VM/src/lapi.h",
+        "VM/src/lbuiltins.h",
+        "VM/src/lbytecode.h",
+        "VM/src/lcommon.h",
+        "VM/src/ldebug.h",
+        "VM/src/ldo.h",
+        "VM/src/lfunc.h",
+        "VM/src/lgc.h",
+        "VM/src/lmem.h",
+        "VM/src/lnumutils.h",
+        "VM/src/lobject.h",
+        "VM/src/lstate.h",
+        "VM/src/lstring.h",
+        "VM/src/ltable.h",
+        "VM/src/ltm.h",
+        "VM/src/ludata.h",
+        "VM/src/lvm.h",
+    ],
+    srcs=[
+        "VM/src/lapi.cpp",
+        "VM/src/laux.cpp",
+        "VM/src/lbaselib.cpp",
+        "VM/src/lbitlib.cpp",
+        "VM/src/lbuiltins.cpp",
+        "VM/src/lcorolib.cpp",
+        "VM/src/ldblib.cpp",
+        "VM/src/ldebug.cpp",
+        "VM/src/ldo.cpp",
+        "VM/src/lfunc.cpp",
+        "VM/src/lgc.cpp",
+        "VM/src/lgcdebug.cpp",
+        "VM/src/linit.cpp",
+        "VM/src/lmathlib.cpp",
+        "VM/src/lmem.cpp",
+        "VM/src/lnumprint.cpp",
+        "VM/src/lobject.cpp",
+        "VM/src/loslib.cpp",
+        "VM/src/lperf.cpp",
+        "VM/src/lstate.cpp",
+        "VM/src/lstring.cpp",
+        "VM/src/lstrlib.cpp",
+        "VM/src/ltable.cpp",
+        "VM/src/ltablib.cpp",
+        "VM/src/ltm.cpp",
+        "VM/src/ludata.cpp",
+        "VM/src/lutf8lib.cpp",
+        "VM/src/lvmload.cpp",
+        "VM/src/lvmutils.cpp",
+    ],
+    # FIXME: VM/src most certainly should not be public here
+    public_include_directories=["VM/include", "VM/src"],
+    visibility=["PUBLIC"],
+    deps=[":common", ":lvmexecute"],
+)
+
+cxx_library(
+    name="luau-compiler",
     srcs=glob(["Compiler/src/*.cpp"]),
     headers=glob(["Compiler/include/**/*.h"]),
     public_include_directories=["Compiler/include"],
     visibility=["PUBLIC"],
-    deps=[":Luau.Common", ":Luau.Ast"],
+    deps=[":common", ":ast"],
 )
 
 cxx_library(
-    name="Luau.CodeGen",
+    name="codegen",
     srcs=glob(["CodeGen/src/*.cpp"]),
     headers=glob(["CodeGen/include/CodeGen/*.h"]),
     public_include_directories=["CodeGen/include"],
     visibility=["PUBLIC"],
-    deps=[":Luau.Common", ":Luau.VM"],
+    deps=[":common", ":vm"],
 )
 
 cxx_library(
-    name="Luau.CLI",
+    name="cli",
     srcs=[
         "CLI/Repl.cpp",
         "CLI/FileUtils.cpp",
@@ -75,18 +141,17 @@ cxx_library(
     public_include_directories=["CLI"],
     visibility=["PUBLIC"],
 
-    # FIXME: How do I skip this on Windows?
     exported_linker_flags=select({
         "DEFAULT": [],
         "config//os:linux": ["-lpthread"],
     }),
 
     deps=[
-        ":Luau.Common",
-        ":Luau.Ast",
-        ":Luau.VM",
-        ":Luau.CodeGen",
-        ":Luau.Compiler",
+        ":common",
+        ":ast",
+        ":vm",
+        ":codegen",
+        ":luau-compiler",
         ":isocline",
     ],
 )
@@ -102,7 +167,7 @@ cxx_library(
 
 cxx_binary(
     name="Luau.UnitTest",
-    compiler_flags=["-std=c++17", "-DDOCTEST_CONFIG_DOUBLE_STRINGIFY"],
+    compiler_flags=["-DDOCTEST_CONFIG_DOUBLE_STRINGIFY"],
     srcs=glob(["tests/*.cpp"]),
     headers=["extern/doctest.h"],
     include_directories=[
@@ -110,13 +175,13 @@ cxx_binary(
     ],
     link_style="static",
     deps=[
-        ":Luau.Common",
-        ":Luau.Ast",
-        ":Luau.Analysis",
-        ":Luau.CodeGen",
-        ":Luau.Compiler",
-        ":Luau.VM",
-        ":Luau.CLI",
+        ":common",
+        ":ast",
+        ":analysis",
+        ":codegen",
+        ":luau-compiler",
+        ":vm",
+        ":cli",
         ":isocline",
     ],
 )
