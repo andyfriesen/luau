@@ -175,8 +175,8 @@ def generate_vcxproj(path: str, filename: str, project: Project):
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\\Microsoft.Cpp.Default.props" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
-    <ConfigurationType>Application</ConfigurationType>
-    <CharacterSet>MultiByte</CharacterSet>
+    <ConfigurationType>Makefile</ConfigurationType>
+    <UseDebugLibraries>false</UseDebugLibraries>
     <PlatformToolset>v143</PlatformToolset>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\\Microsoft.Cpp.props" />
@@ -188,18 +188,16 @@ def generate_vcxproj(path: str, filename: str, project: Project):
   <PropertyGroup Label="UserMacros" />''')
         
         # TODO figure these directories out
-        p('''
+        p(f'''
   <PropertyGroup>
-    <_ProjectFileVersion>10.0.20506.1</_ProjectFileVersion>
-    <OutDir>C:\\Users\\andyf\\src\\luau\\cmake-build\\Debug\\</OutDir>
-    <IntDir>Luau.UnitTest.dir\\Debug\\</IntDir>
-    <TargetName>Luau.UnitTest</TargetName>
-    <TargetExt>.exe</TargetExt>
-    <LinkIncremental>true</LinkIncremental>
-    <GenerateManifest>true</GenerateManifest>
+    <NMakeBuildCommandLine>cd {os.path.abspath('.')} &amp;&amp; buck2 build :{project.name}</NMakeBuildCommandLine>
+    <NMakeOutput>aoeu.exe</NMakeOutput>
+    <!-- NMakeCleanCommandLine>make clean</NMakeCleanCommandLine -->
+    <!-- NMakeReBuildCommandLine>make clean %3b make</NMakeReBuildCommandLine -->
+    <NMakePreprocessorDefinitions>NDEBUG;$(NMakePreprocessorDefinitions)</NMakePreprocessorDefinitions>
   </PropertyGroup>
 ''')
-        
+
         p('<ItemGroup>')
         p.indent()
         for src in project.sources:
@@ -242,10 +240,10 @@ def generate_vcxproj_filters(path: str, name: str, project: Project):
 
         p(f'''<ItemGroup>
 <Filter Include="Header Files">
-    <UniqueIdentifier>{{{uuid.uuid5(uuid.NAMESPACE_DNS, 'buck2-header-filter')}}}</UniqueIdentifier>
+    <UniqueIdentifier>{{{uuid.uuid5(uuid.NAMESPACE_DNS, 'buck2-header-filter-{name}')}}}</UniqueIdentifier>
 </Filter>
 <Filter Include="Source Files">
-    <UniqueIdentifier>{{{uuid.uuid5(uuid.NAMESPACE_DNS, 'buck2-source-filter')}}}</UniqueIdentifier>
+    <UniqueIdentifier>{{{uuid.uuid5(uuid.NAMESPACE_DNS, 'buck2-source-filter-{name}')}}}</UniqueIdentifier>
 </Filter>
 </ItemGroup>
 ''')
