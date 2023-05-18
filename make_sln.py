@@ -1,4 +1,4 @@
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Literal
 import argparse
 import json
 import os.path
@@ -63,8 +63,11 @@ def get_deps(project: str) -> List[str]:
 
     return res
 
+ProjectType = Literal['Unknown', 'Application', 'StaticLibrary', 'DynamicLibrary']
+
 class Actions:
-    def __init__(self, argsfiles: Dict[str, List[str]], compile_actions: Dict[str, Tuple[str, List[str]]], link_actions) -> None:
+    def __init__(self, project_type: ProjectType, argsfiles: Dict[str, List[str]], compile_actions: Dict[str, Tuple[str, List[str]]], link_actions) -> None:
+        self.project_type = project_type
         self.argsfiles = argsfiles
         self.compile_actions = compile_actions
         self.link_actions = link_actions
@@ -90,11 +93,23 @@ def parse_cl_args(cmd: str):
         elif arg == '-c':
             i += 1
             src_path = args[i].replace(os.path.sep, '/')
+        elif arg.startswith('"') and arg.endswith('"'):
+            out_args.append(arg[1:-1].replace('\\\\', '\\'))
         else:
             out_args.append(arg)
         i += 1
 
     return (src_path, obj_path, out_args)
+
+def parse_argfile(content: str):
+    result = []
+
+    for line in content.split('\n'):
+        if line.startswith('"') and line.endswith('"'):
+            result.append(line[1:-1].replace('\\\\', '\\'))
+        pass
+
+    return result
 
 def get_actions(project: str):
     doc = json.loads(call(['buck2', 'aquery', f'filter("{project}", deps(:{project}))', '-A']).stdout)
@@ -102,26 +117,31 @@ def get_actions(project: str):
     argsfiles = {}
     compile_actions = {}
     link_actions = []
+    project_type = 'Unknown'
 
     for v in doc.values():
         kind = v['kind']
         if kind == 'symlinkeddir':
             pass
         elif kind == 'write':
-            argsfiles[v['identifier']] = list(l.strip() for l in v['contents'].split('\n'))
+            argsfiles[v['identifier']] = parse_argfile(v['contents'])
         elif kind == 'run' and v['category'] == 'cxx_compile':
             (src_path, obj_path, out_args) = parse_cl_args(v['cmd'])
             compile_actions[src_path] = (obj_path, out_args)
         elif kind == 'run' and v['category'] == 'cxx_link':
-            stderr('TODO', repr(v), file=sys.stderr) # TODO TODO TODO
+            stderr('TODO', repr(v)) # TODO TODO TODO
+            project_type = 'StaticLibrary' # DynamicLibrary?
         elif kind == 'run' and v['category'] == 'archive':
-            stderr('TODO', repr(v), file=sys.stderr) # TODO TODO TODO
+            stderr('TODO', repr(v)) # TODO TODO TODO
+            project_type = 'StaticLibrary'
+
         elif kind == 'run' and v['category'] == 'cxx_link_executable':
             link_actions.append((v['identifier'], parse_cmd_str(v['cmd']))) # TODO identifier is the empty string
+            project_type = 'Application'
         else:
             assert 0, 'Unknown action ' + repr(v)
 
-    return Actions(argsfiles, compile_actions, link_actions)
+    return Actions(project_type, argsfiles, compile_actions, link_actions)
 
 class Project:
     def __init__(self, name: str, guid: str, sources: List[str], deps: List[str], actions: Actions):
@@ -230,8 +250,7 @@ def generate_vcxproj(path: str, project: Project):
         p('<?xml version="1.0"  encoding="utf-8"?>')
 
         p.open_tag('Project', 'DefaultTargets="Build"', 'ToolsVersion="17.0"', 'xmlns="http://schemas.microsoft.com/developer/msbuild/2003"')
-        p(f'''
-  <PropertyGroup>
+        p(f'''<PropertyGroup>
     <PreferredToolArchitecture>x64</PreferredToolArchitecture>
   </PropertyGroup>
   <ItemGroup Label="ProjectConfigurations">
@@ -248,12 +267,20 @@ def generate_vcxproj(path: str, project: Project):
     <ProjectName>{project.name}</ProjectName>
     <VCProjectUpgraderObjectName>NoUpgrade</VCProjectUpgraderObjectName>
   </PropertyGroup>
-  <Import Project="$(VCTargetsPath)\\Microsoft.Cpp.Default.props" />
+  <Import Project="$(VCTargetsPath)\\Microsoft.Cpp.Default.props" />''')
+        
+        p.open_tag('PropertyGroup', 'Label="Configuration"')
+        p(f'<ConfigurationType>{project.actions.project_type}</ConfigurationType>')
+        p(f'<UseDebugLibraries>false</UseDebugLibraries>')
+        p(f'<PlatformToolset>v143</PlatformToolset>')
+        p.close_tag()
+        """p('''
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
     <ConfigurationType>Makefile</ConfigurationType>
     <UseDebugLibraries>false</UseDebugLibraries>
     <PlatformToolset>v143</PlatformToolset>
-  </PropertyGroup>
+  </PropertyGroup>''')"""
+        p('''
   <Import Project="$(VCTargetsPath)\\Microsoft.Cpp.props" />
   <ImportGroup Label="ExtensionSettings">
   </ImportGroup>
@@ -284,7 +311,6 @@ def generate_vcxproj(path: str, project: Project):
 
             if src.endswith('.cpp') or src.endswith('.c'):
                 p.open_tag('ClCompile', f'Include="{os.path.abspath(src)}"')
-                p.open_tag('AdditionalOptions')
 
                 additional_args = []
 
@@ -299,8 +325,7 @@ def generate_vcxproj(path: str, project: Project):
                     else:
                         additional_args.append(arg)
 
-                p(' '.join(additional_args))
-                p.close_tag()
+                p(f"<AdditionalOptions>{' '.join(additional_args)}</AdditionalOptions>")
                 p.close_tag()
                 # p(f'<ClCompile Include="{os.path.abspath(src)}" />')
             elif src.endswith('.h'):
