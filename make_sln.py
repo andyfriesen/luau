@@ -1,4 +1,4 @@
-from typing import Dict, List
+from typing import Dict, List, Tuple
 import argparse
 import json
 import os.path
@@ -11,8 +11,6 @@ VERBOSE = set()
 VERBOSE.add('call')
 
 CXX_PROJECT_GUID = '8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942'
-
-UTF8_BOM = bytes([0xEF, 0xBB, 0xBF])
 
 def stderr(*args, **kw):
     print(*args, **kw, file=sys.stderr)
@@ -65,12 +63,72 @@ def get_deps(project: str) -> List[str]:
 
     return res
 
+class Actions:
+    def __init__(self, argsfiles, compile_actions: Dict[str, Tuple[str, List[str]]], link_actions) -> None:
+        self.argsfiles = argsfiles
+        self.compile_actions = compile_actions
+        self.link_actions = link_actions
+
+def parse_cmd_str(s: str) -> List[str]:
+    assert(s.startswith('['))
+    assert(s.endswith(']'))
+
+    s = s[1:-1]
+    return s.split(', ')
+
+def parse_cl_args(cmd: str):
+    args = parse_cmd_str(cmd)
+    src_path = ''
+    obj_path = ''
+    out_args = []
+    assert args[0] == 'cl.exe'
+    i = 1
+    while i < len(args):
+        arg = args[i]
+        if arg.startswith('/Fo'):
+            obj_path = arg[3:]
+        elif arg == '-c':
+            i += 1
+            src_path = args[i].replace(os.path.sep, '/')
+        else:
+            out_args.append(arg)
+        i += 1
+    return (src_path, obj_path, out_args)
+
+def get_actions(project: str):
+    doc = json.loads(call(['buck2', 'aquery', f'filter("{project}", deps(:{project}))', '-A']).stdout)
+
+    argsfiles = []
+    compile_actions = {}
+    link_actions = []
+
+    for v in doc.values():
+        kind = v['kind']
+        if kind == 'symlinkeddir':
+            pass
+        elif kind == 'write':
+            argsfiles.append((v['identifier'], v['contents']))
+        elif kind == 'run' and v['category'] == 'cxx_compile':
+            (src_path, obj_path, out_args) = parse_cl_args(v['cmd'])
+            compile_actions[src_path] = (obj_path, out_args)
+        elif kind == 'run' and v['category'] == 'cxx_link':
+            print('TODO', repr(v), file=sys.stderr) # TODO TODO TODO
+        elif kind == 'run' and v['category'] == 'archive':
+            print('TODO', repr(v), file=sys.stderr) # TODO TODO TODO
+        elif kind == 'run' and v['category'] == 'cxx_link_executable':
+            link_actions.append((v['identifier'], parse_cmd_str(v['cmd']))) # TODO identifier is the empty string
+        else:
+            assert 0, 'Unknown action ' + repr(v)
+
+    return Actions(argsfiles, compile_actions, link_actions)
+
 class Project:
-    def __init__(self, name: str, sources: List[str], deps: List[str], guid: str):
+    def __init__(self, name: str, guid: str, sources: List[str], deps: List[str], actions: Actions):
         self.name = name
+        self.guid = guid
         self.sources = sources
         self.deps = deps
-        self.guid = guid
+        self.actions = actions
 
 projects = {}
 
@@ -78,11 +136,12 @@ projects = {}
 for proj in args.project:
     sources = get_sources(proj)
     deps = get_deps(proj)
+    actions = get_actions(proj)
 
     key = f'buck2-target-to-vs-solution-{proj}'
     guid = uuid.uuid5(uuid.NAMESPACE_DNS, key)
 
-    projects[proj] = Project(proj, sources, deps, str(guid))
+    projects[proj] = Project(proj, str(guid), sources, deps, actions)
 
 solution_guid = str(uuid.uuid5(uuid.NAMESPACE_DNS, f'buck2-target-to-vs-{args.output}'))
 
@@ -90,19 +149,34 @@ class Printer:
     def __init__(self, file):
         self.file = file
         self.indentation = 0
+        self.stack = []
 
     def indent(self):
         self.indentation += 4
-    
+
     def dedent(self):
         self.indentation -= 4
-    
+
     def __call__(self, *args: str):
         encoded = [x.encode('utf-8') for x in args]
         self.file.write(b' ' * self.indentation)
         for s in encoded:
             self.file.write(s)
         self.file.write(b'\r\n')
+
+    def open_tag(self, tag, *args):
+        s = tag
+        if args:
+            s += ' ' + ' '.join(args)
+        self(f'<{s}>')
+        self.indent()
+
+        self.stack.append(tag)
+
+    def close_tag(self):
+        top = self.stack.pop()
+        self.dedent()
+        self(f'</{top}>')
 
 def generate_sln(path: str, filename: str, projects: Dict[str, Project]):
     with open(os.path.join(path, filename), 'wb') as outfile:
@@ -146,15 +220,15 @@ def generate_sln(path: str, filename: str, projects: Dict[str, Project]):
         p.dedent()
         p('EndGlobal')
 
-def generate_vcxproj(path: str, filename: str, project: Project):
-    with open(os.path.join(path, filename), 'wb') as outfile:
-        # outfile.write(UTF8_BOM)
+def generate_vcxproj(path: str, project: Project):
+    argsfiles = dict(project.actions.argsfiles)
+
+    with open(os.path.join(path, project.name + '.vcxproj'), 'wb') as outfile:
         p = Printer(outfile)
 
         p('<?xml version="1.0"  encoding="utf-8"?>')
 
-        p('<Project DefaultTargets="Build" ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">')
-        p.indent()
+        p.open_tag('Project', 'DefaultTargets="Build"', 'ToolsVersion="17.0"', 'xmlns="http://schemas.microsoft.com/developer/msbuild/2003"')
         p(f'''
   <PropertyGroup>
     <PreferredToolArchitecture>x64</PreferredToolArchitecture>
@@ -186,7 +260,7 @@ def generate_vcxproj(path: str, filename: str, project: Project):
     <Import Project="$(UserRootDir)\\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />''')
-        
+
         # TODO figure these directories out
         p(f'''
   <PropertyGroup>
@@ -198,22 +272,27 @@ def generate_vcxproj(path: str, filename: str, project: Project):
   </PropertyGroup>
 ''')
 
-        p('<ItemGroup>')
-        p.indent()
+        p.open_tag('ItemGroup')
+        print(project.sources)
         for src in project.sources:
-            p(f'<CustomBuild Include="{os.path.abspath(src)}">')
-            p.indent()
-            p.dedent()
-            p('</CustomBuild>')
-        p.dedent()
-        p('</ItemGroup>')
+            obj = None
+            cmd = None
+            try:
+                (obj, cmd) = project.actions.compile_actions[src]
+            except KeyError:
+                pass
+
+            if src.endswith('.cpp') or src.endswith('.c'):
+                p(f'<ClCompile Include="{os.path.abspath(src)}" />')
+            elif src.endswith('.h'):
+                p(f'<ClInclude Include="{os.path.abspath(src)}" />')
+        p.close_tag()
 
         p('''  <Import Project="$(VCTargetsPath)\\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>
 ''')
-        p.dedent()
-        p('</Project>')
+        p.close_tag()
 
 def generate_vcxproj_filters(path: str, name: str, project: Project):
     with open(os.path.join(path, name), 'wb') as outfile:
@@ -221,20 +300,20 @@ def generate_vcxproj_filters(path: str, name: str, project: Project):
 
         p('''<?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">''')
-        
+
         p.indent()
 
         p('<ItemGroup>')
         p.indent()
         for source in project.sources:
-            p(f'<CustomBuild Include="{os.path.abspath(source)}">')
-            p.indent()
-            if source.endswith('.cpp'):
+            ext = os.path.splitext(source)[1]
+            if ext in ('.cpp', '.c', '.cxx'):
+                p.open_tag('ClCompile', f'Include="{os.path.abspath(source)}"')
                 p('<Filter>Source Files</Filter>')
-            elif source.endswith('.h'):
+            elif ext in ('.h', '.hpp'):
+                p.open_tag('ClInclude', f'Include="{os.path.abspath(source)}"')
                 p('<Filter>Header Files</Filter>')
-            p.dedent()
-            p('</CustomBuild>')
+            p.close_tag()
         p.dedent()
         p('</ItemGroup>')
 
@@ -253,5 +332,5 @@ def generate_vcxproj_filters(path: str, name: str, project: Project):
 
 generate_sln(args.output, args.sln, projects)
 for project in projects.values():
-    generate_vcxproj(args.output, project.name + '.vcxproj', project)
+    generate_vcxproj(args.output, project)
     generate_vcxproj_filters(args.output, project.name + '.vcxproj.filters', project)
