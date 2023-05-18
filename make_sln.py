@@ -64,7 +64,7 @@ def get_deps(project: str) -> List[str]:
     return res
 
 class Actions:
-    def __init__(self, argsfiles, compile_actions: Dict[str, Tuple[str, List[str]]], link_actions) -> None:
+    def __init__(self, argsfiles: Dict[str, List[str]], compile_actions: Dict[str, Tuple[str, List[str]]], link_actions) -> None:
         self.argsfiles = argsfiles
         self.compile_actions = compile_actions
         self.link_actions = link_actions
@@ -93,12 +93,13 @@ def parse_cl_args(cmd: str):
         else:
             out_args.append(arg)
         i += 1
+
     return (src_path, obj_path, out_args)
 
 def get_actions(project: str):
     doc = json.loads(call(['buck2', 'aquery', f'filter("{project}", deps(:{project}))', '-A']).stdout)
 
-    argsfiles = []
+    argsfiles = {}
     compile_actions = {}
     link_actions = []
 
@@ -107,14 +108,14 @@ def get_actions(project: str):
         if kind == 'symlinkeddir':
             pass
         elif kind == 'write':
-            argsfiles.append((v['identifier'], v['contents']))
+            argsfiles[v['identifier']] = list(l.strip() for l in v['contents'].split('\n'))
         elif kind == 'run' and v['category'] == 'cxx_compile':
             (src_path, obj_path, out_args) = parse_cl_args(v['cmd'])
             compile_actions[src_path] = (obj_path, out_args)
         elif kind == 'run' and v['category'] == 'cxx_link':
-            print('TODO', repr(v), file=sys.stderr) # TODO TODO TODO
+            stderr('TODO', repr(v), file=sys.stderr) # TODO TODO TODO
         elif kind == 'run' and v['category'] == 'archive':
-            print('TODO', repr(v), file=sys.stderr) # TODO TODO TODO
+            stderr('TODO', repr(v), file=sys.stderr) # TODO TODO TODO
         elif kind == 'run' and v['category'] == 'cxx_link_executable':
             link_actions.append((v['identifier'], parse_cmd_str(v['cmd']))) # TODO identifier is the empty string
         else:
@@ -273,7 +274,6 @@ def generate_vcxproj(path: str, project: Project):
 ''')
 
         p.open_tag('ItemGroup')
-        print(project.sources)
         for src in project.sources:
             obj = None
             cmd = None
@@ -283,7 +283,26 @@ def generate_vcxproj(path: str, project: Project):
                 pass
 
             if src.endswith('.cpp') or src.endswith('.c'):
-                p(f'<ClCompile Include="{os.path.abspath(src)}" />')
+                p.open_tag('ClCompile', f'Include="{os.path.abspath(src)}"')
+                p.open_tag('AdditionalOptions')
+
+                additional_args = []
+
+                assert cmd
+                for arg in cmd:
+                    if arg.startswith('@'):
+                        arg_file_name = os.path.split(arg)[1]
+                        arg_file_content = project.actions.argsfiles[arg_file_name]
+
+                        for argfile_arg in arg_file_content:
+                            additional_args.append(argfile_arg)
+                    else:
+                        additional_args.append(arg)
+
+                p(' '.join(additional_args))
+                p.close_tag()
+                p.close_tag()
+                # p(f'<ClCompile Include="{os.path.abspath(src)}" />')
             elif src.endswith('.h'):
                 p(f'<ClInclude Include="{os.path.abspath(src)}" />')
         p.close_tag()
