@@ -107,7 +107,8 @@ def parse_argfile(content: str):
     for line in content.split('\n'):
         if line.startswith('"') and line.endswith('"'):
             result.append(line[1:-1].replace('\\\\', '\\'))
-        pass
+        else:
+            result.append(line.strip())
 
     return result
 
@@ -241,6 +242,23 @@ def generate_sln(path: str, filename: str, projects: Dict[str, Project]):
         p.dedent()
         p('EndGlobal')
 
+class ClOptions:
+    def __init__(self, include_path: List[str], other_options: List[str]) -> None:
+        self.include_path = include_path
+        self.other_options = other_options
+
+def parse_cl_options(opts: List[str]) -> ClOptions:
+    include_path = []
+    other_options = []
+    for opt in opts:
+        if opt.startswith('-I') or opt.startswith('/I'):
+            include_path.append(opt[2:])
+        else:
+            other_options.append(opt)
+
+    print("BLAH", opts, include_path, other_options)
+    return ClOptions(include_path, other_options)
+
 def generate_vcxproj(path: str, project: Project):
     argsfiles = dict(project.actions.argsfiles)
 
@@ -324,8 +342,13 @@ def generate_vcxproj(path: str, project: Project):
                             additional_args.append(argfile_arg)
                     else:
                         additional_args.append(arg)
+                
+                options = parse_cl_options(additional_args)
 
-                p(f"<AdditionalOptions>{' '.join(additional_args)}</AdditionalOptions>")
+                if options.include_path:
+                    p(f"<AdditionalIncludeDirectories>{';'.join(map(os.path.abspath, options.include_path))}</AdditionalIncludeDirectories>")
+
+                p(f"<AdditionalOptions>{' '.join(options.other_options)}</AdditionalOptions>")
                 p.close_tag()
                 # p(f'<ClCompile Include="{os.path.abspath(src)}" />')
             elif src.endswith('.h'):
