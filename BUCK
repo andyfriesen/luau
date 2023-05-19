@@ -210,6 +210,7 @@ cxx_binary(
         "CLI/ReplEntry.cpp",
     ],
     linker_flags=select({
+        'config//os:macos': [],
         'config//os:linux': [
             '-lpthread',
         ],
