@@ -15,6 +15,7 @@ cxx_library(
     headers=glob(["Analysis/include/**/*.h"]),
     public_include_directories=["Analysis/include"],
     deps=[":common", ":ast"],
+    link_style="static",
     visibility=["PUBLIC"],
 )
 
@@ -23,6 +24,7 @@ cxx_library(
     srcs=glob(["Ast/src/*.cpp"]),
     headers=glob(["Ast/include/**/*.h"]),
     public_include_directories=["Ast/include"],
+    link_style="static",
     visibility=["PUBLIC"],
     deps=[":common"],
 )
@@ -41,6 +43,7 @@ cxx_library(
     srcs=["VM/src/lvmexecute.cpp"],
     # VM/src most certainly should not be public here
     public_include_directories=["VM/include", "VM/src"],
+    link_style="static",
     deps=[":common"],
     compiler_flags=lvmexecute_compiler_flags,
 )
@@ -99,6 +102,7 @@ cxx_library(
     ],
     # FIXME: VM/src most certainly should not be public here
     public_include_directories=["VM/include", "VM/src"],
+    link_style="static",
     visibility=["PUBLIC"],
     deps=[":common", ":lvmexecute"],
 )
@@ -108,6 +112,7 @@ cxx_library(
     srcs=glob(["Compiler/src/*.cpp"]),
     headers=glob(["Compiler/include/**/*.h"]),
     public_include_directories=["Compiler/include"],
+    link_style="static",
     visibility=["PUBLIC"],
     deps=[":common", ":ast"],
 )
@@ -117,6 +122,7 @@ cxx_library(
     srcs=glob(["CodeGen/src/*.cpp"]),
     headers=glob(["CodeGen/include/CodeGen/*.h"]),
     public_include_directories=["CodeGen/include"],
+    link_style="static",
     visibility=["PUBLIC"],
     deps=[":common", ":vm"],
 )
@@ -139,6 +145,7 @@ cxx_library(
         "CLI/Profiler.h",
     ],
     public_include_directories=["CLI"],
+    link_style="static",
     visibility=["PUBLIC"],
 
     exported_linker_flags=select({
@@ -184,4 +191,40 @@ cxx_binary(
         ":cli",
         ":isocline",
     ],
+)
+
+cxx_binary(
+    name='Luau.Repl.CLI',
+    headers=[
+        "CLI/Coverage.h",
+        "CLI/Flags.h",
+        "CLI/FileUtils.h",
+        "CLI/Profiler.h",
+    ],
+    srcs=[
+        "CLI/Coverage.cpp",
+        "CLI/FileUtils.cpp",
+        "CLI/Flags.cpp",
+        "CLI/Profiler.cpp",
+        "CLI/Repl.cpp",
+        "CLI/ReplEntry.cpp",
+    ],
+    linker_flags=select({
+        'config//os:linux': [
+            '-lpthread',
+        ],
+        'config//os:windows': [
+            # the default stack size that MSVC linker uses is 1 MB; we need more stack space in Debug because stack frames are larger
+            '/STACK:2097152'
+        ]
+    }),
+    link_style="static",
+    deps=[
+        ':luau-compiler',
+        ':codegen',
+        ':vm',
+        ':isocline',
+        ':common',
+        ':ast',
+    ]
 )
