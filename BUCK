@@ -2,31 +2,13 @@
 # FIXME: Preprocessor definitions?
 
 cxx_library(
-    name="common",
-    headers=glob(["Common/include/**/*.h"]),
-    public_include_directories=["Common/include"],
-    header_namespace="Luau",
-    visibility=["PUBLIC"],
-)
-
-cxx_library(
     name="analysis",
     srcs=glob(["Analysis/src/*.cpp"]),
-    headers=glob(["Analysis/include/**/*.h"]),
+    exported_headers=glob(["Analysis/include/**/*.h"]),
     public_include_directories=["Analysis/include"],
-    deps=[":common", ":ast"],
+    deps=["//Common:common", "//Ast:ast"],
     link_style="static",
     visibility=["PUBLIC"],
-)
-
-cxx_library(
-    name="ast",
-    srcs=glob(["Ast/src/*.cpp"]),
-    headers=glob(["Ast/include/**/*.h"]),
-    public_include_directories=["Ast/include"],
-    link_style="static",
-    visibility=["PUBLIC"],
-    deps=[":common"],
 )
 
 lvmexecute_compiler_flags = select({
@@ -41,16 +23,17 @@ lvmexecute_compiler_flags = select({
 cxx_library(
     name="lvmexecute",
     srcs=["VM/src/lvmexecute.cpp"],
+    headers=glob(['VM/src/*.h', 'VM/include/*.h']),
     # VM/src most certainly should not be public here
     public_include_directories=["VM/include", "VM/src"],
     link_style="static",
-    deps=[":common"],
+    deps=["//Common:common"],
     compiler_flags=lvmexecute_compiler_flags,
 )
 
 cxx_library(
     name="vm",
-    headers=[
+    exported_headers=[
         "VM/src/lapi.h",
         "VM/src/lbuiltins.h",
         "VM/src/lbytecode.h",
@@ -68,6 +51,9 @@ cxx_library(
         "VM/src/ltm.h",
         "VM/src/ludata.h",
         "VM/src/lvm.h",
+        "VM/include/lua.h",
+        "VM/include/luaconf.h",
+        "VM/include/lualib.h",
     ],
     srcs=[
         "VM/src/lapi.cpp",
@@ -104,27 +90,29 @@ cxx_library(
     public_include_directories=["VM/include", "VM/src"],
     link_style="static",
     visibility=["PUBLIC"],
-    deps=[":common", ":lvmexecute"],
+    deps=["//Common:common", ":lvmexecute"],
 )
 
 cxx_library(
     name="luau-compiler",
     srcs=glob(["Compiler/src/*.cpp"]),
-    headers=glob(["Compiler/include/**/*.h"]),
+    headers=glob(["Compiler/src/*.h"]),
+    exported_headers=glob(["Compiler/include/**/*.h"]),
     public_include_directories=["Compiler/include"],
     link_style="static",
     visibility=["PUBLIC"],
-    deps=[":common", ":ast"],
+    deps=["//Common:common", "//Ast:ast"],
 )
 
 cxx_library(
     name="codegen",
     srcs=glob(["CodeGen/src/*.cpp"]),
-    headers=glob(["CodeGen/include/CodeGen/*.h"]),
+    headers=glob(['CodeGen/src/*.h', 'CodeGen/include/Luau/*.h']),
+    exported_headers=glob(["CodeGen/include/**/*.h"]),
     public_include_directories=["CodeGen/include"],
     link_style="static",
     visibility=["PUBLIC"],
-    deps=[":common", ":vm"],
+    deps=["//Common:common", ":vm"],
 )
 
 cxx_library(
@@ -137,7 +125,7 @@ cxx_library(
         "CLI/Profiler.cpp",
         "CLI/ReplEntry.cpp",
     ],
-    headers=[
+    exported_headers=[
         "CLI/Repl.h",
         "CLI/FileUtils.h",
         "CLI/Flags.h",
@@ -154,8 +142,8 @@ cxx_library(
     }),
 
     deps=[
-        ":common",
-        ":ast",
+        "//Common:common",
+        "//Ast:ast",
         ":vm",
         ":codegen",
         ":luau-compiler",
@@ -166,7 +154,32 @@ cxx_library(
 cxx_library(
     name="isocline",
     srcs=glob(["extern/isocline/src/isocline.c"]),
-    headers=glob(["extern/isocline/src/*.h", "extern/isocline/include/isocline.h"]),
+    headers=[
+        # Yup.  Not a mistake.  Unity build.
+        "extern/isocline/src/attr.c",
+        "extern/isocline/src/bbcode.c",
+        "extern/isocline/src/bbcode_colors.c",
+        "extern/isocline/src/common.c",
+        "extern/isocline/src/completers.c",
+        "extern/isocline/src/completions.c",
+        "extern/isocline/src/editline.c",
+        "extern/isocline/src/editline_completion.c",
+        "extern/isocline/src/editline_help.c",
+        "extern/isocline/src/editline_history.c",
+        "extern/isocline/src/highlight.c",
+        "extern/isocline/src/history.c",
+        "extern/isocline/src/stringbuf.c",
+        "extern/isocline/src/term.c",
+        "extern/isocline/src/term_color.c",
+        "extern/isocline/src/tty.c",
+        "extern/isocline/src/tty_esc.c",
+        "extern/isocline/src/undo.c",
+        "extern/isocline/src/wcwidth.c",
+    ],
+    exported_headers=glob([
+        "extern/isocline/src/*.h",
+        "extern/isocline/include/isocline.h"
+    ]),
     public_include_directories=["extern/isocline/include"],
     link_style="static",
     visibility=["PUBLIC"],
@@ -176,14 +189,14 @@ cxx_binary(
     name="Luau.UnitTest",
     compiler_flags=["-DDOCTEST_CONFIG_DOUBLE_STRINGIFY"],
     srcs=glob(["tests/*.cpp"]),
-    headers=["extern/doctest.h"],
+    headers=glob(["tests/*.h"]) + ["extern/doctest.h"],
     include_directories=[
         "extern",
     ],
     link_style="static",
     deps=[
-        ":common",
-        ":ast",
+        "//Common:common",
+        "//Ast:ast",
         ":analysis",
         ":codegen",
         ":luau-compiler",
@@ -226,6 +239,6 @@ cxx_binary(
         ':vm',
         ':isocline',
         ':common',
-        ':ast',
+        '//Ast:ast',
     ]
 )

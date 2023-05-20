@@ -12,3 +12,13 @@ buck = none
 
 [parser]
 target_platform_detector_spec = target:root//...->prelude//platforms:default
+
+[buck2_re_client]
+action_cache_address = grpc://192.168.0.165:8980
+engine_address = grpc://192.168.0.165:8980
+cas_address = grpc://192.168.0.165:8980
+tls = false
+instance_name = fuse
+
+[build]
+  execution_platforms = root//platforms:platforms

@@ -1,0 +1,9 @@
+cxx_library(
+    name="ast",
+    srcs=glob(["src/*.cpp"]),
+    exported_headers=glob(["include/Luau/*.h"]),
+    public_include_directories=["include"],
+    link_style="static",
+    visibility=["PUBLIC"],
+    deps=["//Common:common"],
+)
