@@ -1,6 +1,8 @@
 # FIXME: Toolchain-friendly way to specify the C++ language standard?
 # FIXME: Preprocessor definitions?
 
+load(":util.bzl", "multi_target")
+
 cxx_library(
     name="analysis",
     srcs=glob(["Analysis/src/*.cpp"]),
@@ -11,19 +13,32 @@ cxx_library(
     visibility=["PUBLIC"],
 )
 
-lvmexecute_compiler_flags = select({
-    "DEFAULT": None,
-
-    # disable partial redundancy elimination which regresses interpreter codegen substantially in VS2022:
-    # https://developercommunity.visualstudio.com/t/performance-regression-on-a-complex-interpreter-lo/1631863
-    "config//os:windows": ["/d2ssa-pre-"],
-})
+lvmexecute_compiler_flags = select(
+    {
+        "DEFAULT": [],
+        # disable partial redundancy elimination which regresses interpreter codegen substantially in VS2022:
+        # https://developercommunity.visualstudio.com/t/performance-regression-on-a-complex-interpreter-lo/1631863
+        "config//os:windows": ["/d2ssa-pre-"],
+    }
+)
 
 # FIXME This is a pretty awkward way have to say this: We have one random source file that needs an extra compiler option on Windows.
 cxx_library(
     name="lvmexecute",
     srcs=["VM/src/lvmexecute.cpp"],
-    headers=glob(['VM/src/*.h', 'VM/include/*.h']),
+    headers=glob(["VM/src/*.h", "VM/include/*.h"]),
+    # VM/src most certainly should not be public here
+    public_include_directories=["VM/include", "VM/src"],
+    link_style="static",
+    deps=["//Common:common"],
+    compiler_flags=lvmexecute_compiler_flags,
+)
+
+multi_target(
+    name="lvmexecute",
+    rule=cxx_library,
+    srcs=["VM/src/lvmexecute.cpp"],
+    headers=glob(["VM/src/*.h", "VM/include/*.h"]),
     # VM/src most certainly should not be public here
     public_include_directories=["VM/include", "VM/src"],
     link_style="static",
@@ -107,7 +122,7 @@ cxx_library(
 cxx_library(
     name="codegen",
     srcs=glob(["CodeGen/src/*.cpp"]),
-    headers=glob(['CodeGen/src/*.h', 'CodeGen/include/Luau/*.h']),
+    headers=glob(["CodeGen/src/*.h", "CodeGen/include/Luau/*.h"]),
     exported_headers=glob(["CodeGen/include/**/*.h"]),
     public_include_directories=["CodeGen/include"],
     link_style="static",
@@ -135,12 +150,12 @@ cxx_library(
     public_include_directories=["CLI"],
     link_style="static",
     visibility=["PUBLIC"],
-
-    exported_linker_flags=select({
-        "DEFAULT": [],
-        "config//os:linux": ["-lpthread"],
-    }),
-
+    exported_linker_flags=select(
+        {
+            "DEFAULT": [],
+            "config//os:linux": ["-lpthread"],
+        }
+    ),
     deps=[
         "//Common:common",
         "//Ast:ast",
@@ -207,12 +222,13 @@ cxx_binary(
 )
 
 cxx_binary(
-    name='Luau.Repl.CLI',
+    name="Luau.Repl.CLI",
     headers=[
         "CLI/Coverage.h",
         "CLI/Flags.h",
         "CLI/FileUtils.h",
         "CLI/Profiler.h",
+        "CLI/Repl.h",
     ],
     srcs=[
         "CLI/Coverage.cpp",
@@ -222,23 +238,25 @@ cxx_binary(
         "CLI/Repl.cpp",
         "CLI/ReplEntry.cpp",
     ],
-    linker_flags=select({
-        'config//os:macos': [],
-        'config//os:linux': [
-            '-lpthread',
-        ],
-        'config//os:windows': [
-            # the default stack size that MSVC linker uses is 1 MB; we need more stack space in Debug because stack frames are larger
-            '/STACK:2097152'
-        ]
-    }),
+    linker_flags=select(
+        {
+            "config//os:macos": [],
+            "config//os:linux": [
+                "-lpthread",
+            ],
+            "config//os:windows": [
+                # the default stack size that MSVC linker uses is 1 MB; we need more stack space in Debug because stack frames are larger
+                "/STACK:2097152"
+            ],
+        }
+    ),
     link_style="static",
     deps=[
-        ':luau-compiler',
-        ':codegen',
-        ':vm',
-        ':isocline',
-        ':common',
-        '//Ast:ast',
-    ]
+        ":luau-compiler",
+        ":codegen",
+        ":vm",
+        ":isocline",
+        "//Common:common",
+        "//Ast:ast",
+    ],
 )
