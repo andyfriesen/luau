@@ -3,7 +3,8 @@
 
 load(":util.bzl", "multi_target")
 
-cxx_library(
+multi_target(
+    rule=cxx_library,
     name="analysis",
     srcs=glob(["Analysis/src/*.cpp"]),
     exported_headers=glob(["Analysis/include/**/*.h"]),
@@ -46,7 +47,8 @@ multi_target(
     compiler_flags=lvmexecute_compiler_flags,
 )
 
-cxx_library(
+multi_target(
+    rule=cxx_library,
     name="vm",
     exported_headers=[
         "VM/src/lapi.h",
@@ -105,10 +107,11 @@ cxx_library(
     public_include_directories=["VM/include", "VM/src"],
     link_style="static",
     visibility=["PUBLIC"],
-    deps=["//Common:common", ":lvmexecute"],
+    deps=["//Common:common", "+lvmexecute"],
 )
 
-cxx_library(
+multi_target(
+    rule=cxx_library,
     name="luau-compiler",
     srcs=glob(["Compiler/src/*.cpp"]),
     headers=glob(["Compiler/src/*.h"]),
@@ -119,7 +122,8 @@ cxx_library(
     deps=["//Common:common", "//Ast:ast"],
 )
 
-cxx_library(
+multi_target(
+    rule=cxx_library,
     name="codegen",
     srcs=glob(["CodeGen/src/*.cpp"]),
     headers=glob(["CodeGen/src/*.h", "CodeGen/include/Luau/*.h"]),
@@ -127,10 +131,11 @@ cxx_library(
     public_include_directories=["CodeGen/include"],
     link_style="static",
     visibility=["PUBLIC"],
-    deps=["//Common:common", ":vm"],
+    deps=["//Common:common", "+vm"],
 )
 
-cxx_library(
+multi_target(
+    rule=cxx_library,
     name="cli",
     srcs=[
         "CLI/Repl.cpp",
@@ -159,9 +164,9 @@ cxx_library(
     deps=[
         "//Common:common",
         "//Ast:ast",
-        ":vm",
-        ":codegen",
-        ":luau-compiler",
+        "+vm",
+        "+codegen",
+        "+luau-compiler",
         ":isocline",
     ],
 )
@@ -200,7 +205,8 @@ cxx_library(
     visibility=["PUBLIC"],
 )
 
-cxx_binary(
+multi_target(
+    rule=cxx_library,
     name="Luau.UnitTest",
     compiler_flags=["-DDOCTEST_CONFIG_DOUBLE_STRINGIFY"],
     srcs=glob(["tests/*.cpp"]),
@@ -212,11 +218,11 @@ cxx_binary(
     deps=[
         "//Common:common",
         "//Ast:ast",
-        ":analysis",
-        ":codegen",
-        ":luau-compiler",
-        ":vm",
-        ":cli",
+        "+analysis",
+        "+codegen",
+        "+luau-compiler",
+        "+vm",
+        "+cli",
         ":isocline",
     ],
 )
@@ -252,11 +258,16 @@ cxx_binary(
     ),
     link_style="static",
     deps=[
-        ":luau-compiler",
-        ":codegen",
-        ":vm",
+        ":luau-compiler-Release-nosan",
+        ":codegen-Release-nosan",
+        ":vm-Release-nosan",
         ":isocline",
         "//Common:common",
         "//Ast:ast",
     ],
+)
+
+alias(
+    name="Luau.UnitTest",
+    actual=":Luau.UnitTest-Debug-nosan"
 )
