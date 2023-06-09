@@ -11,3 +11,4 @@
 /luau-tests
 /luau-analyze
 __pycache__
+/buck-out
