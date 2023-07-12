@@ -1,10 +1,7 @@
 # FIXME: Toolchain-friendly way to specify the C++ language standard?
 # FIXME: Preprocessor definitions?
 
-load(":util.bzl", "multi_target")
-
-multi_target(
-    rule=cxx_library,
+cxx_library(
     name="analysis",
     srcs=glob(["Analysis/src/*.cpp"]),
     exported_headers=glob(["Analysis/include/**/*.h"]),
@@ -35,20 +32,7 @@ cxx_library(
     compiler_flags=lvmexecute_compiler_flags,
 )
 
-multi_target(
-    name="lvmexecute",
-    rule=cxx_library,
-    srcs=["VM/src/lvmexecute.cpp"],
-    headers=glob(["VM/src/*.h", "VM/include/*.h"]),
-    # VM/src most certainly should not be public here
-    public_include_directories=["VM/include", "VM/src"],
-    link_style="static",
-    deps=["//Common:common"],
-    compiler_flags=lvmexecute_compiler_flags,
-)
-
-multi_target(
-    rule=cxx_library,
+cxx_library(
     name="vm",
     exported_headers=[
         "VM/src/lapi.h",
@@ -107,11 +91,10 @@ multi_target(
     public_include_directories=["VM/include", "VM/src"],
     link_style="static",
     visibility=["PUBLIC"],
-    deps=["//Common:common", "+lvmexecute"],
+    deps=["//Common:common", ":lvmexecute"],
 )
 
-multi_target(
-    rule=cxx_library,
+cxx_library(
     name="luau-compiler",
     srcs=glob(["Compiler/src/*.cpp"]),
     headers=glob(["Compiler/src/*.h"]),
@@ -122,8 +105,7 @@ multi_target(
     deps=["//Common:common", "//Ast:ast"],
 )
 
-multi_target(
-    rule=cxx_library,
+cxx_library(
     name="codegen",
     srcs=glob(["CodeGen/src/*.cpp"]),
     headers=glob(["CodeGen/src/*.h", "CodeGen/include/Luau/*.h"]),
@@ -131,11 +113,10 @@ multi_target(
     public_include_directories=["CodeGen/include"],
     link_style="static",
     visibility=["PUBLIC"],
-    deps=["//Common:common", "+vm"],
+    deps=["//Common:common", ":vm"],
 )
 
-multi_target(
-    rule=cxx_library,
+cxx_library(
     name="cli",
     srcs=[
         "CLI/Repl.cpp",
@@ -164,9 +145,9 @@ multi_target(
     deps=[
         "//Common:common",
         "//Ast:ast",
-        "+vm",
-        "+codegen",
-        "+luau-compiler",
+        ":vm",
+        ":codegen",
+        ":luau-compiler",
         ":isocline",
     ],
 )
@@ -205,8 +186,7 @@ cxx_library(
     visibility=["PUBLIC"],
 )
 
-multi_target(
-    rule=cxx_library,
+cxx_binary(
     name="Luau.UnitTest",
     compiler_flags=["-DDOCTEST_CONFIG_DOUBLE_STRINGIFY"],
     srcs=glob(["tests/*.cpp"]),
@@ -218,11 +198,11 @@ multi_target(
     deps=[
         "//Common:common",
         "//Ast:ast",
-        "+analysis",
-        "+codegen",
-        "+luau-compiler",
-        "+vm",
-        "+cli",
+        ":analysis",
+        ":codegen",
+        ":luau-compiler",
+        ":vm",
+        ":cli",
         ":isocline",
     ],
 )
@@ -265,9 +245,4 @@ cxx_binary(
         "//Common:common",
         "//Ast:ast",
     ],
-)
-
-alias(
-    name="Luau.UnitTest",
-    actual=":Luau.UnitTest-Debug-nosan"
 )

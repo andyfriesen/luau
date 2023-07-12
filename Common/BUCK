@@ -1,3 +1,4 @@
+
 cxx_library(
     name="common",
     exported_headers=glob(["include/Luau/*.h"]),

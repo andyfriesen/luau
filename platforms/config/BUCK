@@ -1,0 +1,16 @@
+
+config_setting(
+    name = "debug",
+    constraint_values = [
+        "//platforms/constraints/config:debug",
+    ],
+    visibility = ["PUBLIC"],
+)
+
+config_setting(
+    name = "release",
+    constraint_values = [
+        "//platforms/constraints/config:release",
+    ],
+    visibility = ["PUBLIC"],
+)

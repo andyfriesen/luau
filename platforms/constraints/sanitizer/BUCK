@@ -1,0 +1,17 @@
+
+constraint_setting(
+    name = "sanitizer",
+    visibility = ["PUBLIC"],
+)
+
+constraint_value(
+    name = "asan",
+    constraint_setting = ":sanitizer",
+    visibility = ["PUBLIC"],
+)
+
+constraint_value(
+    name = "nosan",
+    constraint_setting = ":sanitizer",
+    visibility = ["PUBLIC"],
+)
