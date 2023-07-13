@@ -42,6 +42,9 @@ cxx_flags = select({
         "/MD",
         "/Zc:inline",
     ]
+}) + select({
+    "root//platforms/config:debug": ["-g"],
+    "root//platforms/config:release": ["-O"],
 })
 
 extra_link_options = select({

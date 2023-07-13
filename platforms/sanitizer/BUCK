@@ -1,0 +1,16 @@
+
+config_setting(
+    name = "asan",
+    constraint_values = [
+        "//platforms/constraints/sanitizer:asan",
+    ],
+    visibility = ["PUBLIC"],
+)
+
+config_setting(
+    name = "nosan",
+    constraint_values = [
+        "//platforms/constraints/sanitizer:nosan",
+    ],
+    visibility = ["PUBLIC"],
+)
