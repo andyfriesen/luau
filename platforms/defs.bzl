@@ -78,8 +78,6 @@ def define_platforms(name_prefix: str):
                 _host_cpu_configuration(),
                 _host_os_configuration(),
             ]
-            print(constraints)
-            print(name_prefix + config + "-" + sanitizer)
             platform(
                 name = name_prefix + config + "-" + sanitizer,
                 constraints = constraints,

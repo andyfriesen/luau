@@ -1,10 +1,11 @@
 
-def build_one(ctx, target: "target_set"):
+def build_one(ctx, target: "target_set", result):
     if not len(target):
         return
     cquery = ctx.cquery()
 
     db = [configured_sub_target(r.label, "compilation-database") for r in target]
+    result.extend(db)
 
     ctx.build(
         labels=db,
@@ -15,25 +16,17 @@ def build_one(ctx, target: "target_set"):
         deps = cquery.deps(d)
         libtargets = cquery.kind('cxx_library|cxx_binary', deps) - target
         if libtargets:
-            build_one(ctx, libtargets)
-
-# def _compdb_impl(ctx):
-#     cquery = ctx.cquery()
-#     ctarget = cquery.eval(ctx.cli_args.target)
-#     db = [configured_sub_target(r.label, "compilation-database") for r in ctarget]
-#     ctx.build(
-#         labels=db,
-#         target_platform=ctx.cli_args.target_platform,
-#     )
-
-#     deps = cquery.deps(ctarget)
-#     print(deps)
-#     pass
+            build_one(ctx, libtargets, result)
 
 def _compdb_impl(ctx):
     cquery = ctx.cquery()
     ctarget = cquery.eval(ctx.cli_args.target)
-    build_one(ctx, ctarget)
+
+    result = []
+    build_one(ctx, ctarget, result)
+
+    for r in result:
+        print('\t', r)
 
 compdb = bxl(
     impl=_compdb_impl,
