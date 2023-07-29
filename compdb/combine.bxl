@@ -1,0 +1,65 @@
+
+load("@prelude//cxx/comp_db.bzl", "CxxCompilationDbInfo")
+
+def build_one(ctx, cquery, target: "target_set", result):
+    if 0 == len(target):
+        return
+
+    db = [configured_sub_target(r.label, "compilation-database") for r in target]
+
+    b = ctx.build(
+        labels=db,
+        target_platform=ctx.cli_args.target_platform,
+    )
+
+    for k, v in b.items():
+        result.extend([a for a in v.artifacts() if a.short_path == 'compile_commands.json'])
+
+        deps = cquery.deps(target)
+        libtargets = cquery.kind('cxx_library|cxx_binary', deps) - target
+        build_one(ctx, cquery, libtargets, result)
+
+    return
+
+def _compdb_impl(ctx):
+    cquery = ctx.cquery()
+    ctarget = cquery.kind('cxx_library|cxx_binary', cquery.eval(ctx.cli_args.target))
+
+    result = []
+    build_one(ctx, cquery, ctarget, result)
+
+    ensured = []
+
+    bxl_actions = ctx.bxl_actions()
+    actions = bxl_actions.actions
+
+    for r in result:
+        e = ctx.output.ensure(r)
+        abspath = e.rel_path()
+        ensured.append(abspath)
+
+    output = actions.declare_output("compile_commands.json")
+
+    compdbs = ctx.build("//compdb:combine_compdbs")
+    script_runinfo = ctx.analysis(compdbs.items()[0][0]).providers()[RunInfo]
+
+    cmd = cmd_args(script_runinfo)
+    cmd.add(result)
+    cmd.add(cmd_args(output.as_output(), format = "--output={}"))
+
+    a = actions.run(
+        cmd,
+        category = "combine_compdbs"
+    )
+
+    ensured = ctx.output.ensure(output)
+
+    ctx.output.print(ensured.abs_path())
+
+compdb = bxl(
+    impl=_compdb_impl,
+    cli_args= {
+        "target": cli_args.string(),
+        "target_platform": cli_args.option(cli_args.target_label()),
+    }
+)
