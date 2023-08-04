@@ -23,8 +23,8 @@ class Actions:
 
 @dataclass
 class Project:
-    project_type: ProjectType
     name: str
+    project_type: ProjectType
     guid: uuid.UUID
     entries: Dict[str, Entry]
 
@@ -80,17 +80,53 @@ class ClOptions:
 
 def parse_cl_options(opts: List[str]) -> ClOptions:
     include_path = []
+    warnings_are_errors = []
+  
     xml_options = []
     other_options = []
-    for opt in opts[1:]:
-        if opt.startswith('-I') or opt.startswith('/I'):
-            include_path.append(opt[2:])
-        elif opt == "/WX":
-            xml_options.append(("TreatWarningAsError", "true"))
-        elif opt == "/WX-":
-            xml_options.append(("TreatWarningAsError", "false"))
-        else:
-            other_options.append(opt)        
+    opts = opts[:]
+    while opts:
+        opt = opts.pop(0)
+        match opt:
+            case s if opt.startswith('-I') or opt.startswith('/I'):
+                path = s[2:]
+                if path:
+                    # /IWhatever
+                    include_path.append(path)
+                else:
+                    # /I whatever
+                    include_path.append(opts.pop(0))
+
+            case "/WX":
+                xml_options.append(("TreatWarningAsError", "true"))
+            case "/WX-":
+                xml_options.append(("TreatWarningAsError", "false"))
+            case "/fp:precise":
+                xml_options.append(("FloatingPointModel", "precise"))
+            case "/fp:strict":
+                xml_options.append(("FloatingPointModel", "strict"))
+            case "/fp:fast":
+                xml_options.append(("FloatingPointModel", "fast"))
+            case "/fp:except":
+                xml_options.append(("FloatingPointExceptions", "true"))
+            case "/MT":
+                xml_options.append(("RuntimeLibrary", "MultiThreaded"))
+            case "/MTd":
+                xml_options.append(("RuntimeLibrary", "MultiThreadedDebug"))
+            case "/MD":
+                xml_options.append(("RuntimeLibrary", "MultiThreadedDLL"))
+            case "/MDd":
+                xml_options.append(("RuntimeLibrary", "MultiThreadedDebugDLL"))
+
+            case s if opt.startswith("/we"):
+                errornum = s[3:]
+                warnings_are_errors.append(errornum)
+
+            case _:
+                other_options.append(opt)        
+
+    if warnings_are_errors:
+        xml_options.append(('TreatSpecificWarningsAsErrors', ";".join(warnings_are_errors)))
 
     return ClOptions(include_path, xml_options, other_options)
 
@@ -218,7 +254,9 @@ def generate_vcxproj_filters(path: str, name: str, project: Project):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--target', required=True, help='buck2 target to build')
+    parser.add_argument('--project-type', required=True, help='Project type')
     # TODO: It would be cool to accept many compdbs and build a VS config for each
+    # If some files are not present in some configs, we can include the files in the VS solution but disable them in that config.
     parser.add_argument('--compdb', required=True, help='Absolute path to compile_commands.json')
     parser.add_argument('--output', required=True, help='Path to the vcxproj file that will be created')
 
@@ -234,7 +272,7 @@ def main():
 
         actions = parse_compdb(compdb)
 
-        project = Project("Unknown", project_name, guid, actions)
+        project = Project(project_name, args.project_type, guid, actions)
 
         write_vcxproj(out, project)
 
