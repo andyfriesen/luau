@@ -35,7 +35,6 @@ cxx_flags = select({
         "/we4018", # Signed/unsigned mismatch
         "/we4388", # Also signed/unsigned mismatch
         "/Zc:wchar_t",
-        "/O2",
         "/fp:precise",
         "/Gd",
         "/GS",
@@ -44,7 +43,7 @@ cxx_flags = select({
     ]
 }) + select({
     "root//platforms/config:debug": ["-g"],
-    "root//platforms/config:release": ["-O"],
+    "root//platforms/config:release": ["-O2"],
 })
 
 extra_link_options = select({

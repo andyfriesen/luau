@@ -1,10 +1,11 @@
 
 import argparse
-from typing import Dict, List, TextIO, Literal, Tuple, Any
+from dataclasses import dataclass
 import json
 import os.path
+import sys
+from typing import Dict, List, TextIO, Literal, Tuple, Any
 import uuid
-from dataclasses import dataclass
 
 @dataclass
 class Entry:
@@ -75,21 +76,28 @@ class Printer:
 @dataclass
 class ClOptions:
     include_path: List[str]
-    xml_options: List[Tuple[str, str]] # tag name, value
+    xml_options: Dict[str, str] # tag name, value
     other_options: List[str]
 
 def parse_cl_options(opts: List[str]) -> ClOptions:
     include_path = []
-    warnings_are_errors = []
   
-    xml_options = []
+    xml_options = {}
     other_options = []
-    opts = opts[:]
+
+    preprocessor_definitions = []
+    warnings_are_errors = []
+
+    opts = opts[1:] # skip the compiler executable itself
+
     while opts:
         opt = opts.pop(0)
+        assert opt[0] in '-/'
+        opt = opt[1:]
+
         match opt:
-            case s if opt.startswith('-I') or opt.startswith('/I'):
-                path = s[2:]
+            case s if opt.startswith('I'):
+                path = s[1:]
                 if path:
                     # /IWhatever
                     include_path.append(path)
@@ -97,36 +105,107 @@ def parse_cl_options(opts: List[str]) -> ClOptions:
                     # /I whatever
                     include_path.append(opts.pop(0))
 
-            case "/WX":
-                xml_options.append(("TreatWarningAsError", "true"))
-            case "/WX-":
-                xml_options.append(("TreatWarningAsError", "false"))
-            case "/fp:precise":
-                xml_options.append(("FloatingPointModel", "precise"))
-            case "/fp:strict":
-                xml_options.append(("FloatingPointModel", "strict"))
-            case "/fp:fast":
-                xml_options.append(("FloatingPointModel", "fast"))
-            case "/fp:except":
-                xml_options.append(("FloatingPointExceptions", "true"))
-            case "/MT":
-                xml_options.append(("RuntimeLibrary", "MultiThreaded"))
-            case "/MTd":
-                xml_options.append(("RuntimeLibrary", "MultiThreadedDebug"))
-            case "/MD":
-                xml_options.append(("RuntimeLibrary", "MultiThreadedDLL"))
-            case "/MDd":
-                xml_options.append(("RuntimeLibrary", "MultiThreadedDebugDLL"))
+            case s if opt.startswith("D"):
+                sym = s[1:]
+                preprocessor_definitions.append(sym)
 
-            case s if opt.startswith("/we"):
-                errornum = s[3:]
+            case "c":
+                # We already know which file we're compiling
+                opts.pop(0)
+
+            case "WX":
+                xml_options["TreatWarningAsError"] = "true"
+            case "WX-":
+                xml_options["TreatWarningAsError"] = "false"
+
+            case "W0":
+                xml_options["WarningLevel"] = "TurnOffAllWarnings"
+            case "W1":
+                xml_options["WarningLevel"] = "Level1"
+            case "W2":
+                xml_options["WarningLevel"] = "Level2"
+            case "W3":
+                xml_options["WarningLevel"] = "Level3"
+            case "W4":
+                xml_options["WarningLevel"] = "Level4"
+            case "Wall":
+                xml_options["WarningLevel"] = "EnableAllWarnings"
+
+            case "std:c++14":
+                xml_options["LanguageStandard"] = "stdcpp14"
+            case "std:c++17":
+                xml_options["LanguageStandard"] = "stdcpp17"
+            case "std:c++20":
+                xml_options["LanguageStandard"] = "stdcpp20"
+            case "std:c++latest":
+                xml_options["LanguageStandard"] = "stdcpplatest"
+
+            case "Od":
+                xml_options["Optimization"] = "Disabled"
+            case "O1":
+                xml_options["Optimization"] = "MinSpace"
+            case "O2":
+                xml_options["Optimization"] = "MaxSpeed"
+            case "Ox":
+                xml_options["Optimization"] = "Full"
+
+            case "Zc:wchar_t":
+                xml_options["TreatWChar_tAsBuiltInType"] = "true"
+            case "Zc:inline":
+                xml_options["RemoveUnreferencedCodeData"] = "true"
+
+            case "fp:precise":
+                xml_options["FloatingPointModel"] = "precise"
+            case "fp:strict":
+                xml_options["FloatingPointModel"] = "strict"
+            case "fp:fast":
+                xml_options["FloatingPointModel"] = "fast"
+            case "fp:except":
+                xml_options["FloatingPointExceptions"] = "true"
+            case "MT":
+                xml_options["RuntimeLibrary"] = "MultiThreaded"
+            case "MTd":
+                xml_options["RuntimeLibrary"] = "MultiThreadedDebug"
+            case "MD":
+                xml_options["RuntimeLibrary"] = "MultiThreadedDLL"
+            case "MDd":
+                xml_options["RuntimeLibrary"] = "MultiThreadedDebugDLL"
+
+            case "EHa":
+                xml_options['ExceptionHandling'] = 'Async'
+            case "EHs":
+                xml_options['ExceptionHandling'] = 'SyncCThrow'
+            case "EHsc":
+                xml_options['ExceptionHandling'] = 'Sync'
+
+            case "Gd":
+                xml_options['CallingConvention'] = 'Cdecl'
+            case "Gr":
+                xml_options['CallingConvention'] = 'FastCall'
+            case "Gz":
+                xml_options['CallingConvention'] = 'StdCall'
+
+            case "GS":
+                xml_options["BufferSecurityCheck"] = "true"
+
+            case "nologo":
+                pass
+            case "experimental:external":
+                # Only useful prior to VS2019
+                pass
+
+            case s if opt.startswith("we"):
+                errornum = s[2:]
                 warnings_are_errors.append(errornum)
 
             case _:
-                other_options.append(opt)        
+                print(f'Warning: Unknown compiler option {opt}', file=sys.stderr)
+                other_options.append('/' + opt)
 
     if warnings_are_errors:
-        xml_options.append(('TreatSpecificWarningsAsErrors', ";".join(warnings_are_errors)))
+        xml_options['TreatSpecificWarningsAsErrors'] = ";".join(warnings_are_errors)
+    if preprocessor_definitions:
+        xml_options["PreprocessorDefinitions"] = ";".join(preprocessor_definitions)
 
     return ClOptions(include_path, xml_options, other_options)
 
@@ -199,7 +278,7 @@ def write_vcxproj(file: TextIO, project: Project):
             if options.include_path:
                 p(f"<AdditionalIncludeDirectories>{';'.join(map(os.path.abspath, options.include_path))}</AdditionalIncludeDirectories>")
 
-            for tag, value in options.xml_options:
+            for tag, value in options.xml_options.items():
                 p(f'<{tag}>{value}</{tag}>')
 
             p(f"<AdditionalOptions>{' '.join(options.other_options)}</AdditionalOptions>")
