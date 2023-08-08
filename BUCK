@@ -238,9 +238,9 @@ cxx_binary(
     ),
     link_style="static",
     deps=[
-        ":luau-compiler-Release-nosan",
-        ":codegen-Release-nosan",
-        ":vm-Release-nosan",
+        ":luau-compiler",
+        ":codegen",
+        ":vm",
         ":isocline",
         "//Common:common",
         "//Ast:ast",

@@ -1,0 +1,59 @@
+
+def build_vcxproj(ctx: "bxl_ctx", vcxproj_script, actions: "actions", target: "target_node", db: "artifact"):
+    name = target.label.name
+    output = actions.declare_output(name + ".vcxproj")
+
+    attrs = target.attrs_eager()
+
+    rule_type = getattr(target.attrs_eager(), "buck.type")
+    link_style = getattr(target.attrs_eager(), "link_style")
+
+    project_type = "Application"
+    if rule_type == "cxx_library":
+        if link_style == "static":
+            project_type = "StaticLibrary"
+        else:
+            project_type = "DynamicLibrary"
+
+    cmd = cmd_args(vcxproj_script)
+    cmd.add(cmd_args(target.label.raw_target(), format="--target={}"))
+    cmd.add("--project-type=" + project_type)
+    cmd.add(cmd_args(db, format="--compdb={}"))
+    cmd.add(cmd_args(output.as_output(), format="--output={}"))
+
+    actions.run(
+        cmd,
+        category = "vcxproj_file"
+    )
+
+    return output
+
+def _impl(ctx):
+    cquery = ctx.cquery()
+
+    bxl_actions = ctx.bxl_actions(
+        toolchains="toolchains//:python_bootstrap",
+        target_platform="root//platforms:release-nosan",
+        exec_deps="//sln:vcxproj_file"
+    )
+
+    actions = bxl_actions.actions
+
+    dependency_key = bxl_actions.exec_deps.keys()[0]
+    vcxproj_file_script = bxl_actions.exec_deps[dependency_key][RunInfo]
+
+    ctargets = cquery.kind("cxx_library|cxx_binary", cquery.eval(ctx.cli_args.targets))
+
+    for target in ctargets:
+        db = configured_sub_target(target.label, "compilation-database")
+        db_artifact = list(ctx.build(db).items()[0][1].artifacts())[0]
+
+        a = build_vcxproj(ctx, vcxproj_file_script, actions, target, db_artifact)
+        ctx.output.ensure(a)
+
+sln = bxl(
+    impl=_impl,
+    cli_args={
+        "targets": cli_args.string()
+    }
+)
