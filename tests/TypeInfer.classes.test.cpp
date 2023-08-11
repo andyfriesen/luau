@@ -1,102 +1,18 @@
 // This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 #include "Luau/BuiltinDefinitions.h"
+#include "Luau/Common.h"
 #include "Luau/TypeInfer.h"
-#include "Luau/TypeVar.h"
+#include "Luau/Type.h"
 
 #include "Fixture.h"
+#include "ClassFixture.h"
 
 #include "doctest.h"
 
 using namespace Luau;
 using std::nullopt;
 
-struct ClassFixture : BuiltinsFixture
-{
-    ClassFixture()
-    {
-        TypeArena& arena = typeChecker.globalTypes;
-        TypeId numberType = typeChecker.numberType;
-
-        unfreeze(arena);
-
-        TypeId baseClassInstanceType = arena.addType(ClassTypeVar{"BaseClass", {}, nullopt, nullopt, {}, {}, "Test"});
-        getMutable<ClassTypeVar>(baseClassInstanceType)->props = {
-            {"BaseMethod", {makeFunction(arena, baseClassInstanceType, {numberType}, {})}},
-            {"BaseField", {numberType}},
-        };
-
-        TypeId baseClassType = arena.addType(ClassTypeVar{"BaseClass", {}, nullopt, nullopt, {}, {}, "Test"});
-        getMutable<ClassTypeVar>(baseClassType)->props = {
-            {"StaticMethod", {makeFunction(arena, nullopt, {}, {numberType})}},
-            {"Clone", {makeFunction(arena, nullopt, {baseClassInstanceType}, {baseClassInstanceType})}},
-            {"New", {makeFunction(arena, nullopt, {}, {baseClassInstanceType})}},
-        };
-        typeChecker.globalScope->exportedTypeBindings["BaseClass"] = TypeFun{{}, baseClassInstanceType};
-        addGlobalBinding(frontend, "BaseClass", baseClassType, "@test");
-
-        TypeId childClassInstanceType = arena.addType(ClassTypeVar{"ChildClass", {}, baseClassInstanceType, nullopt, {}, {}, "Test"});
-
-        getMutable<ClassTypeVar>(childClassInstanceType)->props = {
-            {"Method", {makeFunction(arena, childClassInstanceType, {}, {typeChecker.stringType})}},
-        };
-
-        TypeId childClassType = arena.addType(ClassTypeVar{"ChildClass", {}, baseClassType, nullopt, {}, {}, "Test"});
-        getMutable<ClassTypeVar>(childClassType)->props = {
-            {"New", {makeFunction(arena, nullopt, {}, {childClassInstanceType})}},
-        };
-        typeChecker.globalScope->exportedTypeBindings["ChildClass"] = TypeFun{{}, childClassInstanceType};
-        addGlobalBinding(frontend, "ChildClass", childClassType, "@test");
-
-        TypeId grandChildInstanceType = arena.addType(ClassTypeVar{"GrandChild", {}, childClassInstanceType, nullopt, {}, {}, "Test"});
-
-        getMutable<ClassTypeVar>(grandChildInstanceType)->props = {
-            {"Method", {makeFunction(arena, grandChildInstanceType, {}, {typeChecker.stringType})}},
-        };
-
-        TypeId grandChildType = arena.addType(ClassTypeVar{"GrandChild", {}, baseClassType, nullopt, {}, {}, "Test"});
-        getMutable<ClassTypeVar>(grandChildType)->props = {
-            {"New", {makeFunction(arena, nullopt, {}, {grandChildInstanceType})}},
-        };
-        typeChecker.globalScope->exportedTypeBindings["GrandChild"] = TypeFun{{}, grandChildInstanceType};
-        addGlobalBinding(frontend, "GrandChild", childClassType, "@test");
-
-        TypeId anotherChildInstanceType = arena.addType(ClassTypeVar{"AnotherChild", {}, baseClassInstanceType, nullopt, {}, {}, "Test"});
-
-        getMutable<ClassTypeVar>(anotherChildInstanceType)->props = {
-            {"Method", {makeFunction(arena, anotherChildInstanceType, {}, {typeChecker.stringType})}},
-        };
-
-        TypeId anotherChildType = arena.addType(ClassTypeVar{"AnotherChild", {}, baseClassType, nullopt, {}, {}, "Test"});
-        getMutable<ClassTypeVar>(anotherChildType)->props = {
-            {"New", {makeFunction(arena, nullopt, {}, {anotherChildInstanceType})}},
-        };
-        typeChecker.globalScope->exportedTypeBindings["AnotherChild"] = TypeFun{{}, anotherChildInstanceType};
-        addGlobalBinding(frontend, "AnotherChild", childClassType, "@test");
-
-        TypeId vector2MetaType = arena.addType(TableTypeVar{});
-
-        TypeId vector2InstanceType = arena.addType(ClassTypeVar{"Vector2", {}, nullopt, vector2MetaType, {}, {}, "Test"});
-        getMutable<ClassTypeVar>(vector2InstanceType)->props = {
-            {"X", {numberType}},
-            {"Y", {numberType}},
-        };
-
-        TypeId vector2Type = arena.addType(ClassTypeVar{"Vector2", {}, nullopt, nullopt, {}, {}, "Test"});
-        getMutable<ClassTypeVar>(vector2Type)->props = {
-            {"New", {makeFunction(arena, nullopt, {numberType, numberType}, {vector2InstanceType})}},
-        };
-        getMutable<TableTypeVar>(vector2MetaType)->props = {
-            {"__add", {makeFunction(arena, nullopt, {vector2InstanceType, vector2InstanceType}, {vector2InstanceType})}},
-        };
-        typeChecker.globalScope->exportedTypeBindings["Vector2"] = TypeFun{{}, vector2InstanceType};
-        addGlobalBinding(frontend, "Vector2", vector2Type, "@test");
-
-        for (const auto& [name, tf] : typeChecker.globalScope->exportedTypeBindings)
-            persist(tf.type);
-
-        freeze(arena);
-    }
-};
+LUAU_FASTFLAG(DebugLuauDeferredConstraintResolution);
 
 TEST_SUITE_BEGIN("TypeInferClasses");
 
@@ -451,6 +367,11 @@ b.X = 2 -- real Vector2.X is also read-only
 
 TEST_CASE_FIXTURE(ClassFixture, "detailed_class_unification_error")
 {
+    ScopedFastFlag sff[] = {
+        {"LuauAlwaysCommitInferencesOfFunctionCalls", true},
+        {"LuauIndentTypeMismatch", true},
+    };
+    ScopedFastInt sfi{"LuauIndentTypeMismatchMaxTypeLength", 10};
     CheckResult result = check(R"(
 local function foo(v)
     return v.X :: number + string.len(v.Y)
@@ -462,10 +383,11 @@ b(a)
     )");
 
     LUAU_REQUIRE_ERROR_COUNT(1, result);
-    CHECK_EQ(R"(Type 'Vector2' could not be converted into '{- X: a, Y: string -}'
+    const std::string expected = R"(Type 'Vector2' could not be converted into '{- X: number, Y: string -}'
 caused by:
-  Property 'Y' is not compatible. Type 'number' could not be converted into 'string')",
-        toString(result.errors[0]));
+  Property 'Y' is not compatible. 
+Type 'number' could not be converted into 'string')";
+    CHECK_EQ(expected, toString(result.errors[0]));
 }
 
 TEST_CASE_FIXTURE(ClassFixture, "class_type_mismatch_with_name_conflict")
@@ -478,6 +400,244 @@ local a: ChildClass = i
 
     LUAU_REQUIRE_ERROR_COUNT(1, result);
     CHECK_EQ("Type 'ChildClass' from 'Test' could not be converted into 'ChildClass' from 'MainModule'", toString(result.errors[0]));
+}
+
+TEST_CASE_FIXTURE(ClassFixture, "intersections_of_unions_of_classes")
+{
+    CheckResult result = check(R"(
+        local x : (BaseClass | Vector2) & (ChildClass | AnotherChild)
+        local y : (ChildClass | AnotherChild)
+        x = y
+        y = x
+    )");
+
+    LUAU_REQUIRE_NO_ERRORS(result);
+}
+
+TEST_CASE_FIXTURE(ClassFixture, "unions_of_intersections_of_classes")
+{
+    CheckResult result = check(R"(
+        local x : (BaseClass & ChildClass) | (BaseClass & AnotherChild) | (BaseClass & Vector2)
+        local y : (ChildClass | AnotherChild)
+        x = y
+        y = x
+    )");
+
+    LUAU_REQUIRE_NO_ERRORS(result);
+}
+
+TEST_CASE_FIXTURE(ClassFixture, "index_instance_property")
+{
+    ScopedFastFlag luauAllowIndexClassParameters{"LuauAllowIndexClassParameters", true};
+
+    CheckResult result = check(R"(
+        local function execute(object: BaseClass, name: string)
+            print(object[name])
+        end
+    )");
+
+    LUAU_REQUIRE_ERROR_COUNT(1, result);
+    CHECK_EQ("Attempting a dynamic property access on type 'BaseClass' is unsafe and may cause exceptions at runtime", toString(result.errors[0]));
+}
+
+TEST_CASE_FIXTURE(ClassFixture, "index_instance_property_nonstrict")
+{
+    ScopedFastFlag luauAllowIndexClassParameters{"LuauAllowIndexClassParameters", true};
+
+    CheckResult result = check(R"(
+        --!nonstrict
+
+        local function execute(object: BaseClass, name: string)
+            print(object[name])
+        end
+    )");
+
+    LUAU_REQUIRE_NO_ERRORS(result);
+}
+
+TEST_CASE_FIXTURE(ClassFixture, "type_mismatch_invariance_required_for_error")
+{
+    ScopedFastFlag sff{"LuauIndentTypeMismatch", true};
+    ScopedFastInt sfi{"LuauIndentTypeMismatchMaxTypeLength", 10};
+    CheckResult result = check(R"(
+type A = { x: ChildClass }
+type B = { x: BaseClass }
+
+local a: A
+local b: B = a
+    )");
+
+    LUAU_REQUIRE_ERRORS(result);
+    const std::string expected = R"(Type 'A' could not be converted into 'B'
+caused by:
+  Property 'x' is not compatible. 
+Type 'ChildClass' could not be converted into 'BaseClass' in an invariant context)";
+    CHECK_EQ(expected, toString(result.errors[0]));
+}
+
+TEST_CASE_FIXTURE(ClassFixture, "callable_classes")
+{
+    CheckResult result = check(R"(
+        local x : CallableClass
+        local y = x("testing")
+    )");
+
+    LUAU_REQUIRE_NO_ERRORS(result);
+    CHECK_EQ("number", toString(requireType("y")));
+}
+
+TEST_CASE_FIXTURE(ClassFixture, "indexable_classes")
+{
+    // Test reading from an index
+    {
+        CheckResult result = check(R"(
+            local x : IndexableClass
+            local y = x.stringKey
+        )");
+        LUAU_REQUIRE_NO_ERRORS(result);
+    }
+    {
+        CheckResult result = check(R"(
+            local x : IndexableClass
+            local y = x["stringKey"]
+        )");
+        LUAU_REQUIRE_NO_ERRORS(result);
+    }
+    {
+        CheckResult result = check(R"(
+            local x : IndexableClass
+            local str : string
+            local y = x[str]            -- Index with a non-const string
+        )");
+        LUAU_REQUIRE_NO_ERRORS(result);
+    }
+    {
+        CheckResult result = check(R"(
+            local x : IndexableClass
+            local y = x[7]              -- Index with a numeric key
+        )");
+        LUAU_REQUIRE_NO_ERRORS(result);
+    }
+
+    // Test writing to an index
+    {
+        CheckResult result = check(R"(
+            local x : IndexableClass
+            x.stringKey = 42
+        )");
+        LUAU_REQUIRE_NO_ERRORS(result);
+    }
+    {
+        CheckResult result = check(R"(
+            local x : IndexableClass
+            x["stringKey"] = 42
+        )");
+        LUAU_REQUIRE_NO_ERRORS(result);
+    }
+    {
+        CheckResult result = check(R"(
+            local x : IndexableClass
+            local str : string
+            x[str] = 42                 -- Index with a non-const string
+        )");
+        LUAU_REQUIRE_NO_ERRORS(result);
+    }
+    {
+        CheckResult result = check(R"(
+            local x : IndexableClass
+            x[1] = 42                   -- Index with a numeric key
+        )");
+        LUAU_REQUIRE_NO_ERRORS(result);
+    }
+
+    // Try to index the class using an invalid type for the key (key type is 'number | string'.)
+    {
+        CheckResult result = check(R"(
+            local x : IndexableClass
+            local y = x[true]
+        )");
+
+
+        CHECK_EQ(
+            toString(result.errors[0]), "Type 'boolean' could not be converted into 'number | string'; none of the union options are compatible");
+    }
+    {
+        CheckResult result = check(R"(
+            local x : IndexableClass
+            x[true] = 42
+        )");
+
+        CHECK_EQ(
+            toString(result.errors[0]), "Type 'boolean' could not be converted into 'number | string'; none of the union options are compatible");
+    }
+
+    // Test type checking for the return type of the indexer (i.e. a number)
+    {
+        CheckResult result = check(R"(
+            local x : IndexableClass
+            x.key = "string value"
+        )");
+        CHECK_EQ(toString(result.errors[0]), "Type 'string' could not be converted into 'number'");
+    }
+    {
+        CheckResult result = check(R"(
+            local x : IndexableClass
+            local str : string = x.key
+        )");
+        CHECK_EQ(toString(result.errors[0]), "Type 'number' could not be converted into 'string'");
+    }
+
+    // Check that we string key are rejected if the indexer's key type is not compatible with string
+    {
+        CheckResult result = check(R"(
+            local x : IndexableNumericKeyClass
+            x.key = 1
+        )");
+        CHECK_EQ(toString(result.errors.at(0)), "Key 'key' not found in class 'IndexableNumericKeyClass'");
+    }
+    {
+        CheckResult result = check(R"(
+            local x : IndexableNumericKeyClass
+            x["key"] = 1
+        )");
+        if (FFlag::DebugLuauDeferredConstraintResolution)
+            CHECK_EQ(toString(result.errors[0]), "Key 'key' not found in class 'IndexableNumericKeyClass'");
+        else
+            CHECK_EQ(toString(result.errors[0]), "Type 'string' could not be converted into 'number'");
+    }
+    {
+        CheckResult result = check(R"(
+            local x : IndexableNumericKeyClass
+            local str : string
+            x[str] = 1                  -- Index with a non-const string
+        )");
+        CHECK_EQ(toString(result.errors[0]), "Type 'string' could not be converted into 'number'");
+    }
+    {
+        CheckResult result = check(R"(
+            local x : IndexableNumericKeyClass
+            local y = x.key
+        )");
+        CHECK_EQ(toString(result.errors[0]), "Key 'key' not found in class 'IndexableNumericKeyClass'");
+    }
+    {
+        CheckResult result = check(R"(
+            local x : IndexableNumericKeyClass
+            local y = x["key"]
+        )");
+        if (FFlag::DebugLuauDeferredConstraintResolution)
+            CHECK_EQ(toString(result.errors[0]), "Key 'key' not found in class 'IndexableNumericKeyClass'");
+        else
+            CHECK_EQ(toString(result.errors[0]), "Type 'string' could not be converted into 'number'");
+    }
+    {
+        CheckResult result = check(R"(
+            local x : IndexableNumericKeyClass
+            local str : string
+            local y = x[str]            -- Index with a non-const string
+        )");
+        CHECK_EQ(toString(result.errors[0]), "Type 'string' could not be converted into 'number'");
+    }
 }
 
 TEST_SUITE_END();

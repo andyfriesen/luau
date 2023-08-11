@@ -2,13 +2,18 @@
 #include "Luau/Error.h"
 
 #include "Luau/Clone.h"
+#include "Luau/Common.h"
+#include "Luau/FileResolver.h"
+#include "Luau/NotNull.h"
 #include "Luau/StringUtils.h"
 #include "Luau/ToString.h"
 
+#include <optional>
 #include <stdexcept>
+#include <type_traits>
 
-LUAU_FASTFLAGVARIABLE(LuauTypeMismatchModuleNameResolution, false)
-LUAU_FASTFLAGVARIABLE(LuauUseInternalCompilerErrorException, false)
+LUAU_FASTFLAGVARIABLE(LuauIndentTypeMismatch, false)
+LUAU_FASTINTVARIABLE(LuauIndentTypeMismatchMaxTypeLength, 10)
 
 static std::string wrongNumberOfArgsString(
     size_t expectedCount, std::optional<size_t> maximumCount, size_t actualCount, const char* argPrefix = nullptr, bool isVariadic = false)
@@ -65,50 +70,73 @@ struct ErrorConverter
 
         std::string result;
 
+        auto quote = [&](std::string s) {
+            return "'" + s + "'";
+        };
+
+        auto constructErrorMessage = [&](std::string givenType, std::string wantedType, std::optional<std::string> givenModule,
+                                         std::optional<std::string> wantedModule) -> std::string {
+            std::string given = givenModule ? quote(givenType) + " from " + quote(*givenModule) : quote(givenType);
+            std::string wanted = wantedModule ? quote(wantedType) + " from " + quote(*wantedModule) : quote(wantedType);
+            size_t luauIndentTypeMismatchMaxTypeLength = size_t(FInt::LuauIndentTypeMismatchMaxTypeLength);
+            if (givenType.length() <= luauIndentTypeMismatchMaxTypeLength || wantedType.length() <= luauIndentTypeMismatchMaxTypeLength)
+                return "Type " + given + " could not be converted into " + wanted;
+            return "Type\n    " + given + "\ncould not be converted into\n    " + wanted;
+        };
+
         if (givenTypeName == wantedTypeName)
         {
             if (auto givenDefinitionModule = getDefinitionModuleName(tm.givenType))
             {
                 if (auto wantedDefinitionModule = getDefinitionModuleName(tm.wantedType))
                 {
-                    if (FFlag::LuauTypeMismatchModuleNameResolution && fileResolver != nullptr)
+                    if (fileResolver != nullptr)
                     {
                         std::string givenModuleName = fileResolver->getHumanReadableModuleName(*givenDefinitionModule);
                         std::string wantedModuleName = fileResolver->getHumanReadableModuleName(*wantedDefinitionModule);
-                        result = "Type '" + givenTypeName + "' from '" + givenModuleName + "' could not be converted into '" + wantedTypeName +
-                                 "' from '" + wantedModuleName + "'";
+                        if (FFlag::LuauIndentTypeMismatch)
+                            result = constructErrorMessage(givenTypeName, wantedTypeName, givenModuleName, wantedModuleName);
+                        else
+                            result = "Type '" + givenTypeName + "' from '" + givenModuleName + "' could not be converted into '" + wantedTypeName +
+                                     "' from '" + wantedModuleName + "'";
                     }
                     else
                     {
-                        result = "Type '" + givenTypeName + "' from '" + *givenDefinitionModule + "' could not be converted into '" + wantedTypeName +
-                                 "' from '" + *wantedDefinitionModule + "'";
+                        if (FFlag::LuauIndentTypeMismatch)
+                            result = constructErrorMessage(givenTypeName, wantedTypeName, *givenDefinitionModule, *wantedDefinitionModule);
+                        else
+                            result = "Type '" + givenTypeName + "' from '" + *givenDefinitionModule + "' could not be converted into '" +
+                                     wantedTypeName + "' from '" + *wantedDefinitionModule + "'";
                     }
                 }
             }
         }
 
         if (result.empty())
-            result = "Type '" + givenTypeName + "' could not be converted into '" + wantedTypeName + "'";
+        {
+            if (FFlag::LuauIndentTypeMismatch)
+                result = constructErrorMessage(givenTypeName, wantedTypeName, std::nullopt, std::nullopt);
+            else
+                result = "Type '" + givenTypeName + "' could not be converted into '" + wantedTypeName + "'";
+        }
+
 
         if (tm.error)
         {
             result += "\ncaused by:\n  ";
 
             if (!tm.reason.empty())
-                result += tm.reason + " ";
+                result += tm.reason + (FFlag::LuauIndentTypeMismatch ? " \n" : " ");
 
-            if (FFlag::LuauTypeMismatchModuleNameResolution)
-            {
-                result += Luau::toString(*tm.error, TypeErrorToStringOptions{fileResolver});
-            }
-            else
-            {
-                result += Luau::toString(*tm.error);
-            }
+            result += Luau::toString(*tm.error, TypeErrorToStringOptions{fileResolver});
         }
         else if (!tm.reason.empty())
         {
             result += "; " + tm.reason;
+        }
+        else if (tm.context == TypeMismatch::InvariantContext)
+        {
+            result += " in an invariant context";
         }
 
         return result;
@@ -122,8 +150,6 @@ struct ErrorConverter
             return "Unknown global '" + e.name + "'";
         case UnknownSymbol::Type:
             return "Unknown type '" + e.name + "'";
-        case UnknownSymbol::Generic:
-            return "Unknown generic '" + e.name + "'";
         }
 
         LUAU_ASSERT(!"Unexpected context for UnknownSymbol");
@@ -133,9 +159,9 @@ struct ErrorConverter
     std::string operator()(const Luau::UnknownProperty& e) const
     {
         TypeId t = follow(e.table);
-        if (get<TableTypeVar>(t))
+        if (get<TableType>(t))
             return "Key '" + e.key + "' not found in table '" + Luau::toString(t) + "'";
-        else if (get<ClassTypeVar>(t))
+        else if (get<ClassType>(t))
             return "Key '" + e.key + "' not found in class '" + Luau::toString(t) + "'";
         else
             return "Type '" + Luau::toString(e.table) + "' does not have key '" + e.key + "'";
@@ -169,7 +195,10 @@ struct ErrorConverter
 
     std::string operator()(const Luau::DuplicateTypeDefinition& e) const
     {
-        return "Redefinition of type '" + e.name + "', previously defined at line " + std::to_string(e.previousLocation.begin.line + 1);
+        std::string s = "Redefinition of type '" + e.name + "'";
+        if (e.previousLocation)
+            s += ", previously defined at line " + std::to_string(e.previousLocation->begin.line + 1);
+        return s;
     }
 
     std::string operator()(const Luau::CountMismatch& e) const
@@ -183,11 +212,14 @@ struct ErrorConverter
         case CountMismatch::Return:
             return "Expected to return " + std::to_string(e.expected) + " value" + expectedS + ", but " + std::to_string(e.actual) + " " +
                    actualVerb + " returned here";
-        case CountMismatch::Result:
+        case CountMismatch::FunctionResult:
             // It is alright if right hand side produces more values than the
             // left hand side accepts. In this context consider only the opposite case.
-            return "Function only returns " + std::to_string(e.expected) + " value" + expectedS + ". " + std::to_string(e.actual) +
-                   " are required here";
+            return "Function only returns " + std::to_string(e.expected) + " value" + expectedS + ", but " + std::to_string(e.actual) + " " +
+                   actualVerb + " required here";
+        case CountMismatch::ExprListResult:
+            return "Expression list has " + std::to_string(e.expected) + " value" + expectedS + ", but " + std::to_string(e.actual) + " " +
+                   actualVerb + " required here";
         case CountMismatch::Arg:
             if (!e.function.empty())
                 return "Argument count mismatch. Function '" + e.function + "' " +
@@ -297,7 +329,7 @@ struct ErrorConverter
         std::string s = "Key '" + e.key + "' not found in ";
 
         TypeId t = follow(e.table);
-        if (get<ClassTypeVar>(t))
+        if (get<ClassType>(t))
             s += "class";
         else
             s += "table";
@@ -345,7 +377,10 @@ struct ErrorConverter
             else
                 s += " -> ";
 
-            s += name;
+            if (fileResolver != nullptr)
+                s += fileResolver->getHumanReadableModuleName(name);
+            else
+                s += name;
         }
 
         return s;
@@ -466,6 +501,40 @@ struct ErrorConverter
     {
         return "Code is too complex to typecheck! Consider simplifying the code around this area";
     }
+
+    std::string operator()(const TypePackMismatch& e) const
+    {
+        return "Type pack '" + toString(e.givenTp) + "' could not be converted into '" + toString(e.wantedTp) + "'";
+    }
+
+    std::string operator()(const DynamicPropertyLookupOnClassesUnsafe& e) const
+    {
+        return "Attempting a dynamic property access on type '" + Luau::toString(e.ty) + "' is unsafe and may cause exceptions at runtime";
+    }
+
+    std::string operator()(const UninhabitedTypeFamily& e) const
+    {
+        return "Type family instance " + Luau::toString(e.ty) + " is uninhabited";
+    }
+
+    std::string operator()(const UninhabitedTypePackFamily& e) const
+    {
+        return "Type pack family instance " + Luau::toString(e.tp) + " is uninhabited";
+    }
+
+    std::string operator()(const WhereClauseNeeded& e) const
+    {
+        return "Type family instance " + Luau::toString(e.ty) +
+               " depends on generic function parameters but does not appear in the function signature; this construct cannot be type-checked at this "
+               "time";
+    }
+
+    std::string operator()(const PackWhereClauseNeeded& e) const
+    {
+        return "Type pack family instance " + Luau::toString(e.tp) +
+               " depends on generic function parameters but does not appear in the function signature; this construct cannot be type-checked at this "
+               "time";
+    }
 };
 
 struct InvalidNameChecker
@@ -505,11 +574,35 @@ TypeMismatch::TypeMismatch(TypeId wantedType, TypeId givenType, std::string reas
 {
 }
 
-TypeMismatch::TypeMismatch(TypeId wantedType, TypeId givenType, std::string reason, TypeError error)
+TypeMismatch::TypeMismatch(TypeId wantedType, TypeId givenType, std::string reason, std::optional<TypeError> error)
     : wantedType(wantedType)
     , givenType(givenType)
     , reason(reason)
-    , error(std::make_shared<TypeError>(std::move(error)))
+    , error(error ? std::make_shared<TypeError>(std::move(*error)) : nullptr)
+{
+}
+
+TypeMismatch::TypeMismatch(TypeId wantedType, TypeId givenType, TypeMismatch::Context context)
+    : wantedType(wantedType)
+    , givenType(givenType)
+    , context(context)
+{
+}
+
+TypeMismatch::TypeMismatch(TypeId wantedType, TypeId givenType, std::string reason, TypeMismatch::Context context)
+    : wantedType(wantedType)
+    , givenType(givenType)
+    , context(context)
+    , reason(reason)
+{
+}
+
+TypeMismatch::TypeMismatch(TypeId wantedType, TypeId givenType, std::string reason, std::optional<TypeError> error, TypeMismatch::Context context)
+    : wantedType(wantedType)
+    , givenType(givenType)
+    , context(context)
+    , reason(reason)
+    , error(error ? std::make_shared<TypeError>(std::move(*error)) : nullptr)
 {
 }
 
@@ -521,7 +614,7 @@ bool TypeMismatch::operator==(const TypeMismatch& rhs) const
     if (error && !(*error == *rhs.error))
         return false;
 
-    return *wantedType == *rhs.wantedType && *givenType == *rhs.givenType && reason == rhs.reason;
+    return *wantedType == *rhs.wantedType && *givenType == *rhs.givenType && reason == rhs.reason && context == rhs.context;
 }
 
 bool UnknownSymbol::operator==(const UnknownSymbol& rhs) const
@@ -661,7 +754,17 @@ bool FunctionExitsWithoutReturning::operator==(const FunctionExitsWithoutReturni
 
 int TypeError::code() const
 {
-    return 1000 + int(data.index());
+    return minCode() + int(data.index());
+}
+
+int TypeError::minCode()
+{
+    return 1000;
+}
+
+TypeErrorSummary TypeError::summary() const
+{
+    return TypeErrorSummary{location, moduleName, code()};
 }
 
 bool TypeError::operator==(const TypeError& rhs) const
@@ -724,6 +827,36 @@ bool TypesAreUnrelated::operator==(const TypesAreUnrelated& rhs) const
     return left == rhs.left && right == rhs.right;
 }
 
+bool TypePackMismatch::operator==(const TypePackMismatch& rhs) const
+{
+    return *wantedTp == *rhs.wantedTp && *givenTp == *rhs.givenTp;
+}
+
+bool DynamicPropertyLookupOnClassesUnsafe::operator==(const DynamicPropertyLookupOnClassesUnsafe& rhs) const
+{
+    return ty == rhs.ty;
+}
+
+bool UninhabitedTypeFamily::operator==(const UninhabitedTypeFamily& rhs) const
+{
+    return ty == rhs.ty;
+}
+
+bool UninhabitedTypePackFamily::operator==(const UninhabitedTypePackFamily& rhs) const
+{
+    return tp == rhs.tp;
+}
+
+bool WhereClauseNeeded::operator==(const WhereClauseNeeded& rhs) const
+{
+    return ty == rhs.ty;
+}
+
+bool PackWhereClauseNeeded::operator==(const PackWhereClauseNeeded& rhs) const
+{
+    return tp == rhs.tp;
+}
+
 std::string toString(const TypeError& error)
 {
     return toString(error, TypeErrorToStringOptions{});
@@ -741,7 +874,7 @@ bool containsParseErrorName(const TypeError& error)
 }
 
 template<typename T>
-void copyError(T& e, TypeArena& destArena, CloneState cloneState)
+void copyError(T& e, TypeArena& destArena, CloneState& cloneState)
 {
     auto clone = [&](auto&& ty) {
         return ::Luau::clone(ty, destArena, cloneState);
@@ -875,67 +1008,58 @@ void copyError(T& e, TypeArena& destArena, CloneState cloneState)
     else if constexpr (std::is_same_v<T, NormalizationTooComplex>)
     {
     }
+    else if constexpr (std::is_same_v<T, TypePackMismatch>)
+    {
+        e.wantedTp = clone(e.wantedTp);
+        e.givenTp = clone(e.givenTp);
+    }
+    else if constexpr (std::is_same_v<T, DynamicPropertyLookupOnClassesUnsafe>)
+        e.ty = clone(e.ty);
+    else if constexpr (std::is_same_v<T, UninhabitedTypeFamily>)
+        e.ty = clone(e.ty);
+    else if constexpr (std::is_same_v<T, UninhabitedTypePackFamily>)
+        e.tp = clone(e.tp);
+    else if constexpr (std::is_same_v<T, WhereClauseNeeded>)
+        e.ty = clone(e.ty);
+    else if constexpr (std::is_same_v<T, PackWhereClauseNeeded>)
+        e.tp = clone(e.tp);
     else
         static_assert(always_false_v<T>, "Non-exhaustive type switch");
 }
 
-void copyErrors(ErrorVec& errors, TypeArena& destArena)
+void copyErrors(ErrorVec& errors, TypeArena& destArena, NotNull<BuiltinTypes> builtinTypes)
 {
-    CloneState cloneState;
+    CloneState cloneState{builtinTypes};
 
     auto visitErrorData = [&](auto&& e) {
         copyError(e, destArena, cloneState);
     };
 
-    LUAU_ASSERT(!destArena.typeVars.isFrozen());
+    LUAU_ASSERT(!destArena.types.isFrozen());
     LUAU_ASSERT(!destArena.typePacks.isFrozen());
 
     for (TypeError& error : errors)
         visit(visitErrorData, error.data);
 }
 
-void InternalErrorReporter::ice(const std::string& message, const Location& location)
+void InternalErrorReporter::ice(const std::string& message, const Location& location) const
 {
-    if (FFlag::LuauUseInternalCompilerErrorException)
-    {
-        InternalCompilerError error(message, moduleName, location);
+    InternalCompilerError error(message, moduleName, location);
 
-        if (onInternalError)
-            onInternalError(error.what());
+    if (onInternalError)
+        onInternalError(error.what());
 
-        throw error;
-    }
-    else
-    {
-        std::runtime_error error("Internal error in " + moduleName + " at " + toString(location) + ": " + message);
-
-        if (onInternalError)
-            onInternalError(error.what());
-
-        throw error;
-    }
+    throw error;
 }
 
-void InternalErrorReporter::ice(const std::string& message)
+void InternalErrorReporter::ice(const std::string& message) const
 {
-    if (FFlag::LuauUseInternalCompilerErrorException)
-    {
-        InternalCompilerError error(message, moduleName);
+    InternalCompilerError error(message, moduleName);
 
-        if (onInternalError)
-            onInternalError(error.what());
+    if (onInternalError)
+        onInternalError(error.what());
 
-        throw error;
-    }
-    else
-    {
-        std::runtime_error error("Internal error in " + moduleName + ": " + message);
-
-        if (onInternalError)
-            onInternalError(error.what());
-
-        throw error;
-    }
+    throw error;
 }
 
 const char* InternalCompilerError::what() const throw()

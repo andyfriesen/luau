@@ -13,48 +13,9 @@
 #include <limits.h>
 
 LUAU_FASTINTVARIABLE(LuauSuggestionDistance, 4)
-LUAU_FASTFLAGVARIABLE(LuauLintGlobalNeverReadBeforeWritten, false)
-LUAU_FASTFLAGVARIABLE(LuauLintFixDeprecationMessage, false)
 
 namespace Luau
 {
-
-// clang-format off
-static const char* kWarningNames[] = {
-    "Unknown",
-
-    "UnknownGlobal",
-    "DeprecatedGlobal",
-    "GlobalUsedAsLocal",
-    "LocalShadow",
-    "SameLineStatement",
-    "MultiLineStatement",
-    "LocalUnused",
-    "FunctionUnused",
-    "ImportUnused",
-    "BuiltinGlobalWrite",
-    "PlaceholderRead",
-    "UnreachableCode",
-    "UnknownType",
-    "ForRange",
-    "UnbalancedAssignment",
-    "ImplicitReturn",
-    "DuplicateLocal",
-    "FormatString",
-    "TableLiteral",
-    "UninitializedLocal",
-    "DuplicateFunction",
-    "DeprecatedApi",
-    "TableOperations",
-    "DuplicateCondition",
-    "MisleadingAndOr",
-    "CommentDirective",
-    "IntegerParsing",
-    "ComparisonPrecedence",
-};
-// clang-format on
-
-static_assert(std::size(kWarningNames) == unsigned(LintWarning::Code__Count), "did you forget to add warning to the list?");
 
 struct LintContext
 {
@@ -307,22 +268,11 @@ private:
                 emitWarning(*context, LintWarning::Code_UnknownGlobal, gv->location, "Unknown global '%s'", gv->name.value);
             else if (g->deprecated)
             {
-                if (FFlag::LuauLintFixDeprecationMessage)
-                {
-                    if (const char* replacement = *g->deprecated; replacement && strlen(replacement))
-                        emitWarning(*context, LintWarning::Code_DeprecatedGlobal, gv->location, "Global '%s' is deprecated, use '%s' instead",
-                            gv->name.value, replacement);
-                    else
-                        emitWarning(*context, LintWarning::Code_DeprecatedGlobal, gv->location, "Global '%s' is deprecated", gv->name.value);
-                }
+                if (const char* replacement = *g->deprecated; replacement && strlen(replacement))
+                    emitWarning(*context, LintWarning::Code_DeprecatedGlobal, gv->location, "Global '%s' is deprecated, use '%s' instead",
+                        gv->name.value, replacement);
                 else
-                {
-                    if (*g->deprecated)
-                        emitWarning(*context, LintWarning::Code_DeprecatedGlobal, gv->location, "Global '%s' is deprecated, use '%s' instead",
-                            gv->name.value, *g->deprecated);
-                    else
-                        emitWarning(*context, LintWarning::Code_DeprecatedGlobal, gv->location, "Global '%s' is deprecated", gv->name.value);
-                }
+                    emitWarning(*context, LintWarning::Code_DeprecatedGlobal, gv->location, "Global '%s' is deprecated", gv->name.value);
             }
         }
 
@@ -343,8 +293,7 @@ private:
                         "Global '%s' is only used in the enclosing function defined at line %d; consider changing it to local",
                         g.firstRef->name.value, top->location.begin.line + 1);
             }
-            else if (FFlag::LuauLintGlobalNeverReadBeforeWritten && g.assigned && !g.readBeforeWritten && !g.definedInModuleScope &&
-                     g.firstRef->name != context->placeholder)
+            else if (g.assigned && !g.readBeforeWritten && !g.definedInModuleScope && g.firstRef->name != context->placeholder)
             {
                 emitWarning(*context, LintWarning::Code_GlobalUsedAsLocal, g.firstRef->location,
                     "Global '%s' is never read before being written. Consider changing it to local", g.firstRef->name.value);
@@ -365,7 +314,7 @@ private:
 
     bool visit(AstExprGlobal* node) override
     {
-        if (FFlag::LuauLintGlobalNeverReadBeforeWritten && !functionStack.empty() && !functionStack.back().dominatedGlobals.contains(node->name))
+        if (!functionStack.empty() && !functionStack.back().dominatedGlobals.contains(node->name))
         {
             Global& g = globals[node->name];
             g.readBeforeWritten = true;
@@ -398,18 +347,15 @@ private:
             {
                 Global& g = globals[gv->name];
 
-                if (FFlag::LuauLintGlobalNeverReadBeforeWritten)
+                if (functionStack.empty())
                 {
-                    if (functionStack.empty())
+                    g.definedInModuleScope = true;
+                }
+                else
+                {
+                    if (!functionStack.back().conditionalExecution)
                     {
-                        g.definedInModuleScope = true;
-                    }
-                    else
-                    {
-                        if (!functionStack.back().conditionalExecution)
-                        {
-                            functionStack.back().dominatedGlobals.insert(gv->name);
-                        }
+                        functionStack.back().dominatedGlobals.insert(gv->name);
                     }
                 }
 
@@ -449,11 +395,8 @@ private:
             else
             {
                 g.assigned = true;
-                if (FFlag::LuauLintGlobalNeverReadBeforeWritten)
-                {
-                    g.definedAsFunction = true;
-                    g.definedInModuleScope = functionStack.empty();
-                }
+                g.definedAsFunction = true;
+                g.definedInModuleScope = functionStack.empty();
             }
 
             trackGlobalRef(gv);
@@ -487,9 +430,6 @@ private:
 
     bool visit(AstStatIf* node) override
     {
-        if (!FFlag::LuauLintGlobalNeverReadBeforeWritten)
-            return true;
-
         HoldConditionalExecution ce(*this);
         node->condition->visit(this);
         node->thenbody->visit(this);
@@ -501,9 +441,6 @@ private:
 
     bool visit(AstStatWhile* node) override
     {
-        if (!FFlag::LuauLintGlobalNeverReadBeforeWritten)
-            return true;
-
         HoldConditionalExecution ce(*this);
         node->condition->visit(this);
         node->body->visit(this);
@@ -513,9 +450,6 @@ private:
 
     bool visit(AstStatRepeat* node) override
     {
-        if (!FFlag::LuauLintGlobalNeverReadBeforeWritten)
-            return true;
-
         HoldConditionalExecution ce(*this);
         node->condition->visit(this);
         node->body->visit(this);
@@ -525,9 +459,6 @@ private:
 
     bool visit(AstStatFor* node) override
     {
-        if (!FFlag::LuauLintGlobalNeverReadBeforeWritten)
-            return true;
-
         HoldConditionalExecution ce(*this);
         node->from->visit(this);
         node->to->visit(this);
@@ -542,9 +473,6 @@ private:
 
     bool visit(AstStatForIn* node) override
     {
-        if (!FFlag::LuauLintGlobalNeverReadBeforeWritten)
-            return true;
-
         HoldConditionalExecution ce(*this);
         for (AstExpr* expr : node->values)
             expr->visit(this);
@@ -2135,9 +2063,6 @@ class LintDeprecatedApi : AstVisitor
 public:
     LUAU_NOINLINE static void process(LintContext& context)
     {
-        if (!context.module)
-            return;
-
         LintDeprecatedApi pass{&context};
         context.root->visit(&pass);
     }
@@ -2152,26 +2077,50 @@ private:
 
     bool visit(AstExprIndexName* node) override
     {
-        std::optional<TypeId> ty = context->getType(node->expr);
-        if (!ty)
-            return true;
+        if (std::optional<TypeId> ty = context->getType(node->expr))
+            check(node, follow(*ty));
+        else if (AstExprGlobal* global = node->expr->as<AstExprGlobal>())
+            check(node->location, global->name, node->index);
 
-        if (const ClassTypeVar* cty = get<ClassTypeVar>(follow(*ty)))
+        return true;
+    }
+
+    void check(AstExprIndexName* node, TypeId ty)
+    {
+        if (const ClassType* cty = get<ClassType>(ty))
         {
             const Property* prop = lookupClassProp(cty, node->index.value);
 
             if (prop && prop->deprecated)
                 report(node->location, *prop, cty->name.c_str(), node->index.value);
         }
-        else if (const TableTypeVar* tty = get<TableTypeVar>(follow(*ty)))
+        else if (const TableType* tty = get<TableType>(ty))
         {
             auto prop = tty->props.find(node->index.value);
 
             if (prop != tty->props.end() && prop->second.deprecated)
-                report(node->location, prop->second, tty->name ? tty->name->c_str() : nullptr, node->index.value);
+            {
+                // strip synthetic typeof() for builtin tables
+                if (tty->name && tty->name->compare(0, 7, "typeof(") == 0 && tty->name->back() == ')')
+                    report(node->location, prop->second, tty->name->substr(7, tty->name->length() - 8).c_str(), node->index.value);
+                else
+                    report(node->location, prop->second, tty->name ? tty->name->c_str() : nullptr, node->index.value);
+            }
         }
+    }
 
-        return true;
+    void check(const Location& location, AstName global, AstName index)
+    {
+        if (const LintContext::Global* gv = context->builtinGlobals.find(global))
+        {
+            if (const TableType* tty = get<TableType>(gv->type))
+            {
+                auto prop = tty->props.find(index.value);
+
+                if (prop != tty->props.end() && prop->second.deprecated)
+                    report(location, prop->second, global.value, index.value);
+            }
+        }
     }
 
     void report(const Location& location, const Property& prop, const char* container, const char* field)
@@ -2314,16 +2263,16 @@ private:
 
     size_t getReturnCount(TypeId ty)
     {
-        if (auto ftv = get<FunctionTypeVar>(ty))
+        if (auto ftv = get<FunctionType>(ty))
             return size(ftv->retTypes);
 
-        if (auto itv = get<IntersectionTypeVar>(ty))
+        if (auto itv = get<IntersectionType>(ty))
         {
             // We don't process the type recursively to avoid having to deal with self-recursive intersection types
             size_t result = 0;
 
             for (TypeId part : itv->parts)
-                if (auto ftv = get<FunctionTypeVar>(follow(part)))
+                if (auto ftv = get<FunctionType>(follow(part)))
                     result = std::max(result, size(ftv->retTypes));
 
             return result;
@@ -2651,10 +2600,6 @@ private:
             emitWarning(*context, LintWarning::Code_IntegerParsing, node->location,
                 "Hexadecimal number literal exceeded available precision and has been truncated to 2^64");
             break;
-        case ConstantNumberParseResult::DoublePrefix:
-            emitWarning(*context, LintWarning::Code_IntegerParsing, node->location,
-                "Hexadecimal number literal has a double prefix, which will fail to parse in the future; remove the extra 0x to fix");
-            break;
         }
 
         return true;
@@ -2843,6 +2788,12 @@ static void lintComments(LintContext& context, const std::vector<HotComment>& ho
                             "optimize directive uses unknown optimization level '%s', 0..2 expected", level);
                 }
             }
+            else if (first == "native")
+            {
+                if (space != std::string::npos)
+                    emitWarning(context, LintWarning::Code_CommentDirective, hc.location,
+                        "native directive has extra symbols at the end of the line");
+            }
             else
             {
                 static const char* kHotComments[] = {
@@ -2851,6 +2802,7 @@ static void lintComments(LintContext& context, const std::vector<HotComment>& ho
                     "nonstrict",
                     "strict",
                     "optimize",
+                    "native",
                 };
 
                 if (const char* suggestion = fuzzyMatch(first, kHotComments, std::size(kHotComments)))
@@ -2862,12 +2814,6 @@ static void lintComments(LintContext& context, const std::vector<HotComment>& ho
             }
         }
     }
-}
-
-void LintOptions::setDefaults()
-{
-    // By default, we enable all warnings
-    warningMask = ~0ull;
 }
 
 std::vector<LintWarning> lint(AstStat* root, const AstNameTable& names, const ScopePtr& env, const Module* module,
@@ -2959,54 +2905,6 @@ std::vector<LintWarning> lint(AstStat* root, const AstNameTable& names, const Sc
     std::sort(context.result.begin(), context.result.end(), WarningComparator());
 
     return context.result;
-}
-
-const char* LintWarning::getName(Code code)
-{
-    LUAU_ASSERT(unsigned(code) < Code__Count);
-
-    return kWarningNames[code];
-}
-
-LintWarning::Code LintWarning::parseName(const char* name)
-{
-    for (int code = Code_Unknown; code < Code__Count; ++code)
-        if (strcmp(name, getName(Code(code))) == 0)
-            return Code(code);
-
-    return Code_Unknown;
-}
-
-uint64_t LintWarning::parseMask(const std::vector<HotComment>& hotcomments)
-{
-    uint64_t result = 0;
-
-    for (const HotComment& hc : hotcomments)
-    {
-        if (!hc.header)
-            continue;
-
-        if (hc.content.compare(0, 6, "nolint") != 0)
-            continue;
-
-        size_t name = hc.content.find_first_not_of(" \t", 6);
-
-        // --!nolint disables everything
-        if (name == std::string::npos)
-            return ~0ull;
-
-        // --!nolint needs to be followed by a whitespace character
-        if (name == 6)
-            continue;
-
-        // --!nolint name disables the specific lint
-        LintWarning::Code code = LintWarning::parseName(hc.content.c_str() + name);
-
-        if (code != LintWarning::Code_Unknown)
-            result |= 1ull << int(code);
-    }
-
-    return result;
 }
 
 std::vector<AstName> getDeprecatedGlobals(const AstNameTable& names)

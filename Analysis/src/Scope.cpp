@@ -2,6 +2,8 @@
 
 #include "Luau/Scope.h"
 
+LUAU_FASTFLAG(DebugLuauDeferredConstraintResolution);
+
 namespace Luau
 {
 
@@ -21,7 +23,51 @@ Scope::Scope(const ScopePtr& parent, int subLevel)
     level.subLevel = subLevel;
 }
 
-std::optional<TypeFun> Scope::lookupType(const Name& name)
+void Scope::addBuiltinTypeBinding(const Name& name, const TypeFun& tyFun)
+{
+    exportedTypeBindings[name] = tyFun;
+    builtinTypeNames.insert(name);
+}
+
+std::optional<TypeId> Scope::lookup(Symbol sym) const
+{
+    auto r = const_cast<Scope*>(this)->lookupEx(sym);
+    if (r)
+        return r->first->typeId;
+    else
+        return std::nullopt;
+}
+
+std::optional<std::pair<Binding*, Scope*>> Scope::lookupEx(Symbol sym)
+{
+    Scope* s = this;
+
+    while (true)
+    {
+        auto it = s->bindings.find(sym);
+        if (it != s->bindings.end())
+            return std::pair{&it->second, s};
+
+        if (s->parent)
+            s = s->parent.get();
+        else
+            return std::nullopt;
+    }
+}
+
+// TODO: We might kill Scope::lookup(Symbol) once data flow is fully fleshed out with type states and control flow analysis.
+std::optional<TypeId> Scope::lookup(DefId def) const
+{
+    for (const Scope* current = this; current; current = current->parent.get())
+    {
+        if (auto ty = current->dcrRefinements.find(def))
+            return *ty;
+    }
+
+    return std::nullopt;
+}
+
+std::optional<TypeFun> Scope::lookupType(const Name& name) const
 {
     const Scope* scope = this;
     while (true)
@@ -41,7 +87,7 @@ std::optional<TypeFun> Scope::lookupType(const Name& name)
     }
 }
 
-std::optional<TypeFun> Scope::lookupImportedType(const Name& moduleAlias, const Name& name)
+std::optional<TypeFun> Scope::lookupImportedType(const Name& moduleAlias, const Name& name) const
 {
     const Scope* scope = this;
     while (scope)
@@ -66,7 +112,7 @@ std::optional<TypeFun> Scope::lookupImportedType(const Name& moduleAlias, const 
     return std::nullopt;
 }
 
-std::optional<TypePackId> Scope::lookupPack(const Name& name)
+std::optional<TypePackId> Scope::lookupPack(const Name& name) const
 {
     const Scope* scope = this;
     while (true)
@@ -82,9 +128,9 @@ std::optional<TypePackId> Scope::lookupPack(const Name& name)
     }
 }
 
-std::optional<Binding> Scope::linearSearchForBinding(const std::string& name, bool traverseScopeChain)
+std::optional<Binding> Scope::linearSearchForBinding(const std::string& name, bool traverseScopeChain) const
 {
-    Scope* scope = this;
+    const Scope* scope = this;
 
     while (scope)
     {
@@ -105,21 +151,42 @@ std::optional<Binding> Scope::linearSearchForBinding(const std::string& name, bo
     return std::nullopt;
 }
 
-std::optional<TypeId> Scope::lookup(Symbol sym)
+// Updates the `this` scope with the refinements from the `childScope` excluding ones that doesn't exist in `this`.
+void Scope::inheritRefinements(const ScopePtr& childScope)
 {
-    Scope* s = this;
-
-    while (true)
+    if (FFlag::DebugLuauDeferredConstraintResolution)
     {
-        auto it = s->bindings.find(sym);
-        if (it != s->bindings.end())
-            return it->second.typeId;
-
-        if (s->parent)
-            s = s->parent.get();
-        else
-            return std::nullopt;
+        for (const auto& [k, a] : childScope->dcrRefinements)
+        {
+            if (lookup(NotNull{k}))
+                dcrRefinements[k] = a;
+        }
     }
+
+    for (const auto& [k, a] : childScope->refinements)
+    {
+        Symbol symbol = getBaseSymbol(k);
+        if (lookup(symbol))
+            refinements[k] = a;
+    }
+}
+
+bool subsumesStrict(Scope* left, Scope* right)
+{
+    while (right)
+    {
+        if (right->parent.get() == left)
+            return true;
+
+        right = right->parent.get();
+    }
+
+    return false;
+}
+
+bool subsumes(Scope* left, Scope* right)
+{
+    return left == right || subsumesStrict(left, right);
 }
 
 } // namespace Luau

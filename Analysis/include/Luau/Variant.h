@@ -1,12 +1,12 @@
 // This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 #pragma once
 
-#include "Luau/Common.h"
+#include <initializer_list>
 #include <new>
 #include <type_traits>
-#include <initializer_list>
-#include <stddef.h>
 #include <utility>
+
+#include <stddef.h>
 
 namespace Luau
 {
@@ -58,13 +58,15 @@ public:
 
         constexpr int tid = getTypeId<T>();
         typeId = tid;
-        new (&storage) TT(value);
+        new (&storage) TT(std::forward<T>(value));
     }
 
     Variant(const Variant& other)
     {
+        static constexpr FnCopy table[sizeof...(Ts)] = {&fnCopy<Ts>...};
+
         typeId = other.typeId;
-        tableCopy[typeId](&storage, &other.storage);
+        table[typeId](&storage, &other.storage);
     }
 
     Variant(Variant&& other)
@@ -105,7 +107,7 @@ public:
 
         tableDtor[typeId](&storage);
         typeId = tid;
-        new (&storage) TT(std::forward<Args>(args)...);
+        new (&storage) TT{std::forward<Args>(args)...};
 
         return *reinterpret_cast<T*>(&storage);
     }
@@ -192,7 +194,6 @@ private:
         return *static_cast<const T*>(lhs) == *static_cast<const T*>(rhs);
     }
 
-    static constexpr FnCopy tableCopy[sizeof...(Ts)] = {&fnCopy<Ts>...};
     static constexpr FnMove tableMove[sizeof...(Ts)] = {&fnMove<Ts>...};
     static constexpr FnDtor tableDtor[sizeof...(Ts)] = {&fnDtor<Ts>...};
 

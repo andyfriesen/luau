@@ -9,6 +9,8 @@ namespace Luau
 {
 namespace CodeGen
 {
+namespace X64
+{
 
 enum class SizeX64 : uint8_t
 {
@@ -44,6 +46,18 @@ constexpr RegisterX64 al{SizeX64::byte, 0};
 constexpr RegisterX64 cl{SizeX64::byte, 1};
 constexpr RegisterX64 dl{SizeX64::byte, 2};
 constexpr RegisterX64 bl{SizeX64::byte, 3};
+constexpr RegisterX64 spl{SizeX64::byte, 4};
+constexpr RegisterX64 bpl{SizeX64::byte, 5};
+constexpr RegisterX64 sil{SizeX64::byte, 6};
+constexpr RegisterX64 dil{SizeX64::byte, 7};
+constexpr RegisterX64 r8b{SizeX64::byte, 8};
+constexpr RegisterX64 r9b{SizeX64::byte, 9};
+constexpr RegisterX64 r10b{SizeX64::byte, 10};
+constexpr RegisterX64 r11b{SizeX64::byte, 11};
+constexpr RegisterX64 r12b{SizeX64::byte, 12};
+constexpr RegisterX64 r13b{SizeX64::byte, 13};
+constexpr RegisterX64 r14b{SizeX64::byte, 14};
+constexpr RegisterX64 r15b{SizeX64::byte, 15};
 
 constexpr RegisterX64 eax{SizeX64::dword, 0};
 constexpr RegisterX64 ecx{SizeX64::dword, 1};
@@ -113,5 +127,26 @@ constexpr RegisterX64 ymm13{SizeX64::ymmword, 13};
 constexpr RegisterX64 ymm14{SizeX64::ymmword, 14};
 constexpr RegisterX64 ymm15{SizeX64::ymmword, 15};
 
+constexpr RegisterX64 byteReg(RegisterX64 reg)
+{
+    return RegisterX64{SizeX64::byte, reg.index};
+}
+
+constexpr RegisterX64 wordReg(RegisterX64 reg)
+{
+    return RegisterX64{SizeX64::word, reg.index};
+}
+
+constexpr RegisterX64 dwordReg(RegisterX64 reg)
+{
+    return RegisterX64{SizeX64::dword, reg.index};
+}
+
+constexpr RegisterX64 qwordReg(RegisterX64 reg)
+{
+    return RegisterX64{SizeX64::qword, reg.index};
+}
+
+} // namespace X64
 } // namespace CodeGen
 } // namespace Luau

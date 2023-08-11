@@ -11,7 +11,7 @@ namespace Luau
 struct Scope;
 
 /**
- * The 'level' of a TypeVar is an indirect way to talk about the scope that it 'belongs' too.
+ * The 'level' of a Type is an indirect way to talk about the scope that it 'belongs' too.
  * To start, read http://okmij.org/ftp/ML/generalization.html
  *
  * We extend the idea by adding a "sub-level" which helps us to differentiate sibling scopes
@@ -81,22 +81,7 @@ namespace Luau::Unifiable
 
 using Name = std::string;
 
-struct Free
-{
-    explicit Free(TypeLevel level);
-    explicit Free(Scope* scope);
-
-    int index;
-    TypeLevel level;
-    Scope* scope = nullptr;
-    // True if this free type variable is part of a mutually
-    // recursive type alias whose definitions haven't been
-    // resolved yet.
-    bool forwardedTypeAlias = false;
-
-private:
-    static int nextIndex;
-};
+int freshIndex();
 
 template<typename Id>
 struct Bound
@@ -109,29 +94,9 @@ struct Bound
     Id boundTo;
 };
 
-struct Generic
-{
-    // By default, generics are global, with a synthetic name
-    Generic();
-    explicit Generic(TypeLevel level);
-    explicit Generic(const Name& name);
-    explicit Generic(Scope* scope);
-    Generic(TypeLevel level, const Name& name);
-    Generic(Scope* scope, const Name& name);
-
-    int index;
-    TypeLevel level;
-    Scope* scope = nullptr;
-    Name name;
-    bool explicitName = false;
-
-private:
-    static int nextIndex;
-};
-
 struct Error
 {
-    // This constructor has to be public, since it's used in TypeVar and TypePack,
+    // This constructor has to be public, since it's used in Type and TypePack,
     // but shouldn't be called directly. Please use errorRecoveryType() instead.
     Error();
 
@@ -142,6 +107,6 @@ private:
 };
 
 template<typename Id, typename... Value>
-using Variant = Luau::Variant<Free, Bound<Id>, Generic, Error, Value...>;
+using Variant = Luau::Variant<Bound<Id>, Error, Value...>;
 
 } // namespace Luau::Unifiable

@@ -9,9 +9,12 @@
 namespace Luau
 {
 
+struct BuiltinTypes;
 struct DcrLogger;
-struct SingletonTypes;
+struct TypeCheckLimits;
+struct UnifierSharedState;
 
-void check(NotNull<SingletonTypes> singletonTypes, DcrLogger* logger, const SourceModule& sourceModule, Module* module);
+void check(NotNull<BuiltinTypes> builtinTypes, NotNull<UnifierSharedState> sharedState, NotNull<TypeCheckLimits> limits, DcrLogger* logger, const SourceModule& sourceModule,
+    Module* module);
 
 } // namespace Luau

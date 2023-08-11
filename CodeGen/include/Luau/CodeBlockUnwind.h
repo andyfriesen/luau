@@ -10,8 +10,10 @@ namespace CodeGen
 {
 
 // context must be an UnwindBuilder
-void* createBlockUnwindInfo(void* context, uint8_t* block, size_t blockSize, size_t& unwindDataSizeInBlock);
+void* createBlockUnwindInfo(void* context, uint8_t* block, size_t blockSize, size_t& startOffset);
 void destroyBlockUnwindInfo(void* context, void* unwindData);
+
+bool isUnwindSupported();
 
 } // namespace CodeGen
 } // namespace Luau

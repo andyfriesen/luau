@@ -9,6 +9,7 @@
 #include "Luau/TxnLog.h"
 #include "Luau/TypeArena.h"
 #include "Luau/UnifierSharedState.h"
+#include "Normalize.h"
 
 #include <unordered_set>
 
@@ -24,13 +25,13 @@ enum Variance
 // A substitution which replaces singleton types by their wider types
 struct Widen : Substitution
 {
-    Widen(TypeArena* arena, NotNull<SingletonTypes> singletonTypes)
+    Widen(TypeArena* arena, NotNull<BuiltinTypes> builtinTypes)
         : Substitution(TxnLog::empty(), arena)
-        , singletonTypes(singletonTypes)
+        , builtinTypes(builtinTypes)
     {
     }
 
-    NotNull<SingletonTypes> singletonTypes;
+    NotNull<BuiltinTypes> builtinTypes;
 
     bool isDirty(TypeId ty) override;
     bool isDirty(TypePackId ty) override;
@@ -42,6 +43,21 @@ struct Widen : Substitution
     TypePackId operator()(TypePackId ty);
 };
 
+/**
+ * Normally, when we unify table properties, we must do so invariantly, but we
+ * can introduce a special exception: If the table property in the subtype
+ * position arises from a literal expression, it is safe to instead perform a
+ * covariant check.
+ *
+ * This is very useful for typechecking cases where table literals (and trees of
+ * table literals) are passed directly to functions.
+ *
+ * In this case, we know that the property has no other name referring to it and
+ * so it is perfectly safe for the function to mutate the table any way it
+ * wishes.
+ */
+using LiteralProperties = DenseHashSet<Name>;
+
 // TODO: Use this more widely.
 struct UnifierOptions
 {
@@ -51,21 +67,35 @@ struct UnifierOptions
 struct Unifier
 {
     TypeArena* const types;
-    NotNull<SingletonTypes> singletonTypes;
-    Mode mode;
+    NotNull<BuiltinTypes> builtinTypes;
+    NotNull<Normalizer> normalizer;
 
     NotNull<Scope> scope; // const Scope maybe
     TxnLog log;
+    bool failure = false;
     ErrorVec errors;
     Location location;
     Variance variance = Covariant;
-    bool anyIsTop = false; // If true, we consider any to be a top type.  If false, it is a familiar but weird mix of top and bottom all at once.
+    bool normalize = true;      // Normalize unions and intersections if necessary
+    bool checkInhabited = true; // Normalize types to check if they are inhabited
     CountMismatch::Context ctx = CountMismatch::Arg;
+
+    // If true, generics act as free types when unifying.
+    bool hideousFixMeGenericsAreActuallyFree = false;
 
     UnifierSharedState& sharedState;
 
-    Unifier(TypeArena* types, NotNull<SingletonTypes> singletonTypes, Mode mode, NotNull<Scope> scope, const Location& location, Variance variance,
-        UnifierSharedState& sharedState, TxnLog* parentLog = nullptr);
+    // When the Unifier is forced to unify two blocked types (or packs), they
+    // get added to these vectors.  The ConstraintSolver can use this to know
+    // when it is safe to reattempt dispatching a constraint.
+    std::vector<TypeId> blockedTypes;
+    std::vector<TypePackId> blockedTypePacks;
+
+    Unifier(NotNull<Normalizer> normalizer, NotNull<Scope> scope, const Location& location, Variance variance, TxnLog* parentLog = nullptr);
+
+    // Configure the Unifier to test for scope subsumption via embedded Scope
+    // pointers rather than TypeLevels.
+    void enableNewSolver();
 
     // Test whether the two type vars unify.  Never commits the result.
     ErrorVec canUnify(TypeId subTy, TypeId superTy);
@@ -75,21 +105,31 @@ struct Unifier
      * Populate the vector errors with any type errors that may arise.
      * Populate the transaction log with the set of TypeIds that need to be reset to undo the unification attempt.
      */
-    void tryUnify(TypeId subTy, TypeId superTy, bool isFunctionCall = false, bool isIntersection = false);
+    void tryUnify(TypeId subTy, TypeId superTy, bool isFunctionCall = false, bool isIntersection = false, const LiteralProperties* aliasableMap = nullptr);
 
 private:
-    void tryUnify_(TypeId subTy, TypeId superTy, bool isFunctionCall = false, bool isIntersection = false);
-    void tryUnifyUnionWithType(TypeId subTy, const UnionTypeVar* uv, TypeId superTy);
-    void tryUnifyTypeWithUnion(TypeId subTy, TypeId superTy, const UnionTypeVar* uv, bool cacheEnabled, bool isFunctionCall);
-    void tryUnifyTypeWithIntersection(TypeId subTy, TypeId superTy, const IntersectionTypeVar* uv);
-    void tryUnifyIntersectionWithType(TypeId subTy, const IntersectionTypeVar* uv, TypeId superTy, bool cacheEnabled, bool isFunctionCall);
+    void tryUnify_(TypeId subTy, TypeId superTy, bool isFunctionCall = false, bool isIntersection = false, const LiteralProperties* aliasableMap = nullptr);
+    void tryUnifyUnionWithType(TypeId subTy, const UnionType* uv, TypeId superTy);
+
+    // Traverse the two types provided and block on any BlockedTypes we find.
+    // Returns true if any types were blocked on.
+    bool DEPRECATED_blockOnBlockedTypes(TypeId subTy, TypeId superTy);
+
+    void tryUnifyTypeWithUnion(TypeId subTy, TypeId superTy, const UnionType* uv, bool cacheEnabled, bool isFunctionCall);
+    void tryUnifyTypeWithIntersection(TypeId subTy, TypeId superTy, const IntersectionType* uv);
+    void tryUnifyIntersectionWithType(TypeId subTy, const IntersectionType* uv, TypeId superTy, bool cacheEnabled, bool isFunctionCall);
+    void tryUnifyNormalizedTypes(TypeId subTy, TypeId superTy, const NormalizedType& subNorm, const NormalizedType& superNorm, std::string reason,
+        std::optional<TypeError> error = std::nullopt);
     void tryUnifyPrimitives(TypeId subTy, TypeId superTy);
     void tryUnifySingletons(TypeId subTy, TypeId superTy);
     void tryUnifyFunctions(TypeId subTy, TypeId superTy, bool isFunctionCall = false);
-    void tryUnifyTables(TypeId subTy, TypeId superTy, bool isIntersection = false);
+    void tryUnifyTables(TypeId subTy, TypeId superTy, bool isIntersection = false, const LiteralProperties* aliasableMap = nullptr);
     void tryUnifyScalarShape(TypeId subTy, TypeId superTy, bool reversed);
     void tryUnifyWithMetatable(TypeId subTy, TypeId superTy, bool reversed);
     void tryUnifyWithClass(TypeId subTy, TypeId superTy, bool reversed);
+    void tryUnifyNegations(TypeId subTy, TypeId superTy);
+
+    TypePackId tryApplyOverloadedFunction(TypeId function, const NormalizedFunctionType& overloads, TypePackId args);
 
     TypeId widen(TypeId ty);
     TypePackId widen(TypePackId tp);
@@ -111,24 +151,23 @@ private:
 
     std::optional<TypeId> findTablePropertyRespectingMeta(TypeId lhsType, Name name);
 
-    void tryUnifyWithConstrainedSubTypeVar(TypeId subTy, TypeId superTy);
-    void tryUnifyWithConstrainedSuperTypeVar(TypeId subTy, TypeId superTy);
+    TxnLog combineLogsIntoIntersection(std::vector<TxnLog> logs);
+    TxnLog combineLogsIntoUnion(std::vector<TxnLog> logs);
 
 public:
-    void unifyLowerBound(TypePackId subTy, TypePackId superTy, TypeLevel demotedLevel);
-
     // Returns true if the type "needle" already occurs within "haystack" and reports an "infinite type error"
-    bool occursCheck(TypeId needle, TypeId haystack);
+    bool occursCheck(TypeId needle, TypeId haystack, bool reversed);
     bool occursCheck(DenseHashSet<TypeId>& seen, TypeId needle, TypeId haystack);
-    bool occursCheck(TypePackId needle, TypePackId haystack);
+    bool occursCheck(TypePackId needle, TypePackId haystack, bool reversed);
     bool occursCheck(DenseHashSet<TypePackId>& seen, TypePackId needle, TypePackId haystack);
 
     Unifier makeChildUnifier();
 
     void reportError(TypeError err);
+    LUAU_NOINLINE void reportError(Location location, TypeErrorData data);
 
 private:
-    bool isNonstrictMode() const;
+    TypeMismatch::Context mismatchContext();
 
     void checkChildUnifierTypeMismatch(const ErrorVec& innerErrors, TypeId wantedType, TypeId givenType);
     void checkChildUnifierTypeMismatch(const ErrorVec& innerErrors, const std::string& prop, TypeId wantedType, TypeId givenType);
@@ -138,8 +177,15 @@ private:
 
     // Available after regular type pack unification errors
     std::optional<int> firstPackErrorPos;
+
+    // If true, we do a bunch of small things differently to work better with
+    // the new type inference engine. Most notably, we use the Scope hierarchy
+    // directly rather than using TypeLevels.
+    bool useNewSolver = false;
 };
 
-void promoteTypeLevels(TxnLog& log, const TypeArena* arena, TypeLevel minLevel, TypePackId tp);
+void promoteTypeLevels(TxnLog& log, const TypeArena* arena, TypeLevel minLevel, Scope* outerScope, bool useScope, TypePackId tp);
+std::optional<TypeError> hasUnificationTooComplex(const ErrorVec& errors);
+std::optional<TypeError> hasCountMismatch(const ErrorVec& errors);
 
 } // namespace Luau

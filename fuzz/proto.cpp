@@ -4,6 +4,7 @@
 
 #include "Luau/BuiltinDefinitions.h"
 #include "Luau/BytecodeBuilder.h"
+#include "Luau/CodeGen.h"
 #include "Luau/Common.h"
 #include "Luau/Compiler.h"
 #include "Luau/Frontend.h"
@@ -25,11 +26,17 @@ const bool kFuzzLinter = true;
 const bool kFuzzTypeck = true;
 const bool kFuzzVM = true;
 const bool kFuzzTranspile = true;
+const bool kFuzzCodegenVM = true;
+const bool kFuzzCodegenAssembly = true;
 
 // Should we generate type annotations?
 const bool kFuzzTypes = true;
 
+const Luau::CodeGen::AssemblyOptions::Target kFuzzCodegenTarget = Luau::CodeGen::AssemblyOptions::A64;
+
 static_assert(!(kFuzzVM && !kFuzzCompiler), "VM requires the compiler!");
+static_assert(!(kFuzzCodegenVM && !kFuzzCompiler), "Codegen requires the compiler!");
+static_assert(!(kFuzzCodegenAssembly && !kFuzzCompiler), "Codegen requires the compiler!");
 
 std::vector<std::string> protoprint(const luau::ModuleSet& stat, bool types);
 
@@ -40,6 +47,7 @@ LUAU_FASTINT(LuauTableTypeMaximumStringifierLength)
 LUAU_FASTINT(LuauTypeInferIterationLimit)
 LUAU_FASTINT(LuauTarjanChildLimit)
 LUAU_FASTFLAG(DebugLuauFreezeArena)
+LUAU_FASTFLAG(DebugLuauAbortingChecks)
 
 std::chrono::milliseconds kInterruptTimeout(10);
 std::chrono::time_point<std::chrono::system_clock> interruptDeadline;
@@ -83,6 +91,9 @@ lua_State* createGlobalState()
 {
     lua_State* L = lua_newstate(allocate, NULL);
 
+    if (kFuzzCodegenVM && Luau::CodeGen::isSupported())
+        Luau::CodeGen::create(L);
+
     lua_callbacks(L)->interrupt = interrupt;
 
     luaL_openlibs(L);
@@ -91,48 +102,49 @@ lua_State* createGlobalState()
     return L;
 }
 
-int registerTypes(Luau::TypeChecker& env)
+int registerTypes(Luau::Frontend& frontend, Luau::GlobalTypes& globals, bool forAutocomplete)
 {
     using namespace Luau;
     using std::nullopt;
 
-    Luau::registerBuiltinTypes(env);
+    Luau::registerBuiltinGlobals(frontend, globals, forAutocomplete);
 
-    TypeArena& arena = env.globalTypes;
+    TypeArena& arena = globals.globalTypes;
+    BuiltinTypes& builtinTypes = *globals.builtinTypes;
 
     // Vector3 stub
-    TypeId vector3MetaType = arena.addType(TableTypeVar{});
+    TypeId vector3MetaType = arena.addType(TableType{});
 
-    TypeId vector3InstanceType = arena.addType(ClassTypeVar{"Vector3", {}, nullopt, vector3MetaType, {}, {}, "Test"});
-    getMutable<ClassTypeVar>(vector3InstanceType)->props = {
-        {"X", {env.numberType}},
-        {"Y", {env.numberType}},
-        {"Z", {env.numberType}},
+    TypeId vector3InstanceType = arena.addType(ClassType{"Vector3", {}, nullopt, vector3MetaType, {}, {}, "Test"});
+    getMutable<ClassType>(vector3InstanceType)->props = {
+        {"X", {builtinTypes.numberType}},
+        {"Y", {builtinTypes.numberType}},
+        {"Z", {builtinTypes.numberType}},
     };
 
-    getMutable<TableTypeVar>(vector3MetaType)->props = {
+    getMutable<TableType>(vector3MetaType)->props = {
         {"__add", {makeFunction(arena, nullopt, {vector3InstanceType, vector3InstanceType}, {vector3InstanceType})}},
     };
 
-    env.globalScope->exportedTypeBindings["Vector3"] = TypeFun{{}, vector3InstanceType};
+    globals.globalScope->exportedTypeBindings["Vector3"] = TypeFun{{}, vector3InstanceType};
 
     // Instance stub
-    TypeId instanceType = arena.addType(ClassTypeVar{"Instance", {}, nullopt, nullopt, {}, {}, "Test"});
-    getMutable<ClassTypeVar>(instanceType)->props = {
-        {"Name", {env.stringType}},
+    TypeId instanceType = arena.addType(ClassType{"Instance", {}, nullopt, nullopt, {}, {}, "Test"});
+    getMutable<ClassType>(instanceType)->props = {
+        {"Name", {builtinTypes.stringType}},
     };
 
-    env.globalScope->exportedTypeBindings["Instance"] = TypeFun{{}, instanceType};
+    globals.globalScope->exportedTypeBindings["Instance"] = TypeFun{{}, instanceType};
 
     // Part stub
-    TypeId partType = arena.addType(ClassTypeVar{"Part", {}, instanceType, nullopt, {}, {}, "Test"});
-    getMutable<ClassTypeVar>(partType)->props = {
+    TypeId partType = arena.addType(ClassType{"Part", {}, instanceType, nullopt, {}, {}, "Test"});
+    getMutable<ClassType>(partType)->props = {
         {"Position", {vector3InstanceType}},
     };
 
-    env.globalScope->exportedTypeBindings["Part"] = TypeFun{{}, partType};
+    globals.globalScope->exportedTypeBindings["Part"] = TypeFun{{}, partType};
 
-    for (const auto& [_, fun] : env.globalScope->exportedTypeBindings)
+    for (const auto& [_, fun] : globals.globalScope->exportedTypeBindings)
         persist(fun.type);
 
     return 0;
@@ -140,11 +152,11 @@ int registerTypes(Luau::TypeChecker& env)
 
 static void setupFrontend(Luau::Frontend& frontend)
 {
-    registerTypes(frontend.typeChecker);
-    Luau::freeze(frontend.typeChecker.globalTypes);
+    registerTypes(frontend, frontend.globals, false);
+    Luau::freeze(frontend.globals.globalTypes);
 
-    registerTypes(frontend.typeCheckerForAutocomplete);
-    Luau::freeze(frontend.typeCheckerForAutocomplete.globalTypes);
+    registerTypes(frontend, frontend.globalsForAutocomplete, true);
+    Luau::freeze(frontend.globalsForAutocomplete.globalTypes);
 
     frontend.iceHandler.onInternalError = [](const char* error) {
         printf("ICE: %s\n", error);
@@ -217,6 +229,7 @@ DEFINE_PROTO_FUZZER(const luau::ModuleSet& message)
             flag->value = true;
 
     FFlag::DebugLuauFreezeArena.value = true;
+    FFlag::DebugLuauAbortingChecks.value = true;
 
     std::vector<std::string> sources = protoprint(message, kFuzzTypes);
 
@@ -254,10 +267,11 @@ DEFINE_PROTO_FUZZER(const luau::ModuleSet& message)
     {
         static FuzzFileResolver fileResolver;
         static FuzzConfigResolver configResolver;
-        static Luau::FrontendOptions options{true, true};
-        static Luau::Frontend frontend(&fileResolver, &configResolver, options);
+        static Luau::FrontendOptions defaultOptions{/*retainFullTypeGraphs*/ true, /*forAutocomplete*/ false, /*runLintChecks*/ kFuzzLinter};
+        static Luau::Frontend frontend(&fileResolver, &configResolver, defaultOptions);
 
         static int once = (setupFrontend(frontend), 0);
+        (void)once;
 
         // restart
         frontend.clear();
@@ -277,16 +291,12 @@ DEFINE_PROTO_FUZZER(const luau::ModuleSet& message)
 
             try
             {
-                Luau::CheckResult result = frontend.check(name, std::nullopt);
-
-                // lint (note that we need access to types so we need to do this with typeck in scope)
-                if (kFuzzLinter && result.errors.empty())
-                    frontend.lint(name, std::nullopt);
+                frontend.check(name);
 
                 // Second pass in strict mode (forced by auto-complete)
-                Luau::FrontendOptions opts;
-                opts.forAutocomplete = true;
-                frontend.check(name, opts);
+                Luau::FrontendOptions options = defaultOptions;
+                options.forAutocomplete = true;
+                frontend.check(name, options);
             }
             catch (std::exception&)
             {
@@ -296,7 +306,7 @@ DEFINE_PROTO_FUZZER(const luau::ModuleSet& message)
 
         // validate sharedEnv post-typecheck; valuable for debugging some typeck crashes but slows fuzzing down
         // note: it's important for typeck to be destroyed at this point!
-        for (auto& p : frontend.typeChecker.globalScope->bindings)
+        for (auto& p : frontend.globals.globalScope->bindings)
         {
             Luau::ToStringOptions opts;
             opts.exhaustive = true;
@@ -344,25 +354,53 @@ DEFINE_PROTO_FUZZER(const luau::ModuleSet& message)
         }
     }
 
-    // run resulting bytecode (from last successfully compiler module)
-    if (kFuzzVM && bytecode.size())
+    // run codegen on resulting bytecode (in separate state)
+    if (kFuzzCodegenAssembly && bytecode.size())
     {
-        static lua_State* globalState = createGlobalState();
+        static lua_State* globalState = luaL_newstate();
 
-        lua_State* L = lua_newthread(globalState);
-        luaL_sandboxthread(L);
-
-        if (luau_load(L, "=fuzz", bytecode.data(), bytecode.size(), 0) == 0)
+        if (luau_load(globalState, "=fuzz", bytecode.data(), bytecode.size(), 0) == 0)
         {
-            interruptDeadline = std::chrono::system_clock::now() + kInterruptTimeout;
-
-            lua_resume(L, NULL, 0);
+            Luau::CodeGen::AssemblyOptions options;
+            options.outputBinary = true;
+            options.target = kFuzzCodegenTarget;
+            Luau::CodeGen::getAssembly(globalState, -1, options);
         }
 
         lua_pop(globalState, 1);
-
-        // we'd expect full GC to reclaim all memory allocated by the script
         lua_gc(globalState, LUA_GCCOLLECT, 0);
-        LUAU_ASSERT(heapSize < 256 * 1024);
+    }
+
+    // run resulting bytecode (from last successfully compiler module)
+    if ((kFuzzVM || kFuzzCodegenVM) && bytecode.size())
+    {
+        static lua_State* globalState = createGlobalState();
+
+        auto runCode = [](const std::string& bytecode, bool useCodegen) {
+            lua_State* L = lua_newthread(globalState);
+            luaL_sandboxthread(L);
+
+            if (luau_load(L, "=fuzz", bytecode.data(), bytecode.size(), 0) == 0)
+            {
+                if (useCodegen)
+                    Luau::CodeGen::compile(L, -1);
+
+                interruptDeadline = std::chrono::system_clock::now() + kInterruptTimeout;
+
+                lua_resume(L, NULL, 0);
+            }
+
+            lua_pop(globalState, 1);
+
+            // we'd expect full GC to reclaim all memory allocated by the script
+            lua_gc(globalState, LUA_GCCOLLECT, 0);
+            LUAU_ASSERT(heapSize < 256 * 1024);
+        };
+
+        if (kFuzzVM)
+            runCode(bytecode, false);
+
+        if (kFuzzCodegenVM && Luau::CodeGen::isSupported())
+            runCode(bytecode, true);
     }
 }

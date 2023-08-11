@@ -200,20 +200,14 @@ typedef struct lua_TValue
 ** different types of sets, according to destination
 */
 
-// from stack to (same) stack
-#define setobjs2s setobj
-// to stack (not from same stack)
+// to stack
 #define setobj2s setobj
-#define setsvalue2s setsvalue
-#define sethvalue2s sethvalue
-#define setptvalue2s setptvalue
-// from table to same table
+// from table to same table (no barrier)
 #define setobjt2t setobj
-// to table
+// to table (needs barrier)
 #define setobj2t setobj
-// to new object
+// to new object (no barrier)
 #define setobj2n setobj
-#define setsvalue2n setsvalue
 
 #define setttype(obj, tt) (ttype(obj) = (tt))
 
@@ -269,9 +263,22 @@ typedef struct Proto
     CommonHeader;
 
 
+    uint8_t nups; // number of upvalues
+    uint8_t numparams;
+    uint8_t is_vararg;
+    uint8_t maxstacksize;
+    uint8_t flags;
+
+
     TValue* k;              // constants used by the function
     Instruction* code;      // function bytecode
     struct Proto** p;       // functions defined inside the function
+    const Instruction* codeentry;
+
+    void* execdata;
+    uintptr_t exectarget;
+
+
     uint8_t* lineinfo;      // for each instruction, line number as a delta from baseline
     int* abslineinfo;       // baseline line info, one entry for each 1<<linegaplog2 instructions; allocated after lineinfo
     struct LocVar* locvars; // information about local variables
@@ -281,9 +288,9 @@ typedef struct Proto
     TString* debugname;
     uint8_t* debuginsn; // a copy of code[] array with just opcodes
 
-#if LUA_CUSTOM_EXECUTION
-    void* execdata;
-#endif
+    uint8_t* typeinfo;
+
+    void* userdata;
 
     GCObject* gclist;
 
@@ -296,12 +303,7 @@ typedef struct Proto
     int sizelineinfo;
     int linegaplog2;
     int linedefined;
-
-
-    uint8_t nups; // number of upvalues
-    uint8_t numparams;
-    uint8_t is_vararg;
-    uint8_t maxstacksize;
+    int bytecodeid;
 } Proto;
 // clang-format on
 
@@ -466,4 +468,4 @@ LUAI_FUNC int luaO_rawequalKey(const TKey* t1, const TValue* t2);
 LUAI_FUNC int luaO_str2d(const char* s, double* result);
 LUAI_FUNC const char* luaO_pushvfstring(lua_State* L, const char* fmt, va_list argp);
 LUAI_FUNC const char* luaO_pushfstring(lua_State* L, const char* fmt, ...);
-LUAI_FUNC void luaO_chunkid(char* out, const char* source, size_t len);
+LUAI_FUNC const char* luaO_chunkid(char* buf, size_t buflen, const char* source, size_t srclen);

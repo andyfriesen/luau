@@ -1,7 +1,7 @@
 // This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 #pragma once
 
-#include "Luau/TypeVar.h"
+#include "Luau/Type.h"
 #include "Luau/Unifiable.h"
 #include "Luau/Variant.h"
 
@@ -12,20 +12,50 @@ namespace Luau
 {
 
 struct TypeArena;
+struct TypePackFamily;
+struct TxnLog;
 
 struct TypePack;
 struct VariadicTypePack;
 struct BlockedTypePack;
+struct TypeFamilyInstanceTypePack;
 
 struct TypePackVar;
-
-struct TxnLog;
-
 using TypePackId = const TypePackVar*;
-using FreeTypePack = Unifiable::Free;
+
+struct FreeTypePack
+{
+    explicit FreeTypePack(TypeLevel level);
+    explicit FreeTypePack(Scope* scope);
+    FreeTypePack(Scope* scope, TypeLevel level);
+
+    int index;
+    TypeLevel level;
+    Scope* scope = nullptr;
+};
+
+struct GenericTypePack
+{
+    // By default, generics are global, with a synthetic name
+    GenericTypePack();
+    explicit GenericTypePack(TypeLevel level);
+    explicit GenericTypePack(const Name& name);
+    explicit GenericTypePack(Scope* scope);
+    GenericTypePack(TypeLevel level, const Name& name);
+    GenericTypePack(Scope* scope, const Name& name);
+
+    int index;
+    TypeLevel level;
+    Scope* scope = nullptr;
+    Name name;
+    bool explicitName = false;
+};
+
 using BoundTypePack = Unifiable::Bound<TypePackId>;
-using GenericTypePack = Unifiable::Generic;
-using TypePackVariant = Unifiable::Variant<TypePackId, TypePack, VariadicTypePack, BlockedTypePack>;
+using ErrorTypePack = Unifiable::Error;
+
+using TypePackVariant =
+    Unifiable::Variant<TypePackId, FreeTypePack, GenericTypePack, TypePack, VariadicTypePack, BlockedTypePack, TypeFamilyInstanceTypePack>;
 
 /* A TypePack is a rope-like string of TypeIds.  We use this structure to encode
  * notions like packs of unknown length and packs of any length, as well as more
@@ -45,7 +75,7 @@ struct VariadicTypePack
 };
 
 /**
- * Analogous to a BlockedTypeVar.
+ * Analogous to a BlockedType.
  */
 struct BlockedTypePack
 {
@@ -53,6 +83,17 @@ struct BlockedTypePack
     size_t index;
 
     static size_t nextIndex;
+};
+
+/**
+ * Analogous to a TypeFamilyInstanceType.
+ */
+struct TypeFamilyInstanceTypePack
+{
+    NotNull<TypePackFamily> family;
+
+    std::vector<TypeId> typeArguments;
+    std::vector<TypePackId> packArguments;
 };
 
 struct TypePackVar
@@ -83,7 +124,7 @@ struct TypePackVar
 
 /* Walk the set of TypeIds in a TypePack.
  *
- * Like TypeVars, individual TypePacks can be free, generic, or any.
+ * Like Types, individual TypePacks can be free, generic, or any.
  *
  * We afford the ability to work with these kinds of packs by giving the
  * iterator a .tail() property that yields the tail-most TypePack in the
@@ -141,7 +182,7 @@ using SeenSet = std::set<std::pair<const void*, const void*>>;
 bool areEqual(SeenSet& seen, const TypePackVar& lhs, const TypePackVar& rhs);
 
 TypePackId follow(TypePackId tp);
-TypePackId follow(TypePackId tp, std::function<TypePackId(TypePackId)> mapper);
+TypePackId follow(TypePackId t, const void* context, TypePackId (*mapper)(const void*, TypePackId));
 
 size_t size(TypePackId tp, TxnLog* log = nullptr);
 bool finite(TypePackId tp, TxnLog* log = nullptr);

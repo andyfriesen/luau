@@ -2,14 +2,17 @@
 #pragma once
 
 #include "Luau/Anyification.h"
-#include "Luau/Predicate.h"
+#include "Luau/ControlFlow.h"
 #include "Luau/Error.h"
 #include "Luau/Module.h"
-#include "Luau/Symbol.h"
+#include "Luau/Predicate.h"
 #include "Luau/Substitution.h"
+#include "Luau/Symbol.h"
 #include "Luau/TxnLog.h"
+#include "Luau/Type.h"
+#include "Luau/TypeCheckLimits.h"
 #include "Luau/TypePack.h"
-#include "Luau/TypeVar.h"
+#include "Luau/TypeUtils.h"
 #include "Luau/Unifier.h"
 #include "Luau/UnifierSharedState.h"
 
@@ -17,18 +20,24 @@
 #include <unordered_map>
 #include <unordered_set>
 
-LUAU_FASTFLAG(LuauClassTypeVarsInSubstitution)
-
 namespace Luau
 {
 
 struct Scope;
 struct TypeChecker;
 struct ModuleResolver;
+struct FrontendCancellationToken;
 
 using Name = std::string;
 using ScopePtr = std::shared_ptr<Scope>;
-using OverloadErrorEntry = std::tuple<std::vector<TypeError>, std::vector<TypeId>, const FunctionTypeVar*>;
+
+struct OverloadErrorEntry
+{
+    TxnLog log;
+    ErrorVec errors;
+    std::vector<TypeId> arguments;
+    const FunctionType* fnTy;
+};
 
 bool doesCallError(const AstExprCall* call);
 bool hasBreak(AstStat* node);
@@ -48,17 +57,23 @@ struct HashBoolNamePair
     size_t operator()(const std::pair<bool, Name>& pair) const;
 };
 
-class TimeLimitError : public std::exception
+struct GlobalTypes
 {
-public:
-    virtual const char* what() const throw();
+    GlobalTypes(NotNull<BuiltinTypes> builtinTypes);
+
+    NotNull<BuiltinTypes> builtinTypes; // Global types are based on builtin types
+
+    TypeArena globalTypes;
+    SourceModule globalNames; // names for symbols entered into globalScope
+    ScopePtr globalScope;     // shared by all modules
 };
 
-// All TypeVars are retained via Environment::typeVars.  All TypeIds
+// All Types are retained via Environment::types.  All TypeIds
 // within a program are borrowed pointers into this set.
 struct TypeChecker
 {
-    explicit TypeChecker(ModuleResolver* resolver, NotNull<SingletonTypes> singletonTypes, InternalErrorReporter* iceHandler);
+    explicit TypeChecker(
+        const ScopePtr& globalScope, ModuleResolver* resolver, NotNull<BuiltinTypes> builtinTypes, InternalErrorReporter* iceHandler);
     TypeChecker(const TypeChecker&) = delete;
     TypeChecker& operator=(const TypeChecker&) = delete;
 
@@ -67,25 +82,28 @@ struct TypeChecker
 
     std::vector<std::pair<Location, ScopePtr>> getScopes() const;
 
-    void check(const ScopePtr& scope, const AstStat& statement);
-    void check(const ScopePtr& scope, const AstStatBlock& statement);
-    void check(const ScopePtr& scope, const AstStatIf& statement);
-    void check(const ScopePtr& scope, const AstStatWhile& statement);
-    void check(const ScopePtr& scope, const AstStatRepeat& statement);
-    void check(const ScopePtr& scope, const AstStatReturn& return_);
-    void check(const ScopePtr& scope, const AstStatAssign& assign);
-    void check(const ScopePtr& scope, const AstStatCompoundAssign& assign);
-    void check(const ScopePtr& scope, const AstStatLocal& local);
-    void check(const ScopePtr& scope, const AstStatFor& local);
-    void check(const ScopePtr& scope, const AstStatForIn& forin);
-    void check(const ScopePtr& scope, TypeId ty, const ScopePtr& funScope, const AstStatFunction& function);
-    void check(const ScopePtr& scope, TypeId ty, const ScopePtr& funScope, const AstStatLocalFunction& function);
-    void check(const ScopePtr& scope, const AstStatTypeAlias& typealias, int subLevel = 0, bool forwardDeclare = false);
-    void check(const ScopePtr& scope, const AstStatDeclareClass& declaredClass);
-    void check(const ScopePtr& scope, const AstStatDeclareFunction& declaredFunction);
+    ControlFlow check(const ScopePtr& scope, const AstStat& statement);
+    ControlFlow check(const ScopePtr& scope, const AstStatBlock& statement);
+    ControlFlow check(const ScopePtr& scope, const AstStatIf& statement);
+    ControlFlow check(const ScopePtr& scope, const AstStatWhile& statement);
+    ControlFlow check(const ScopePtr& scope, const AstStatRepeat& statement);
+    ControlFlow check(const ScopePtr& scope, const AstStatReturn& return_);
+    ControlFlow check(const ScopePtr& scope, const AstStatAssign& assign);
+    ControlFlow check(const ScopePtr& scope, const AstStatCompoundAssign& assign);
+    ControlFlow check(const ScopePtr& scope, const AstStatLocal& local);
+    ControlFlow check(const ScopePtr& scope, const AstStatFor& local);
+    ControlFlow check(const ScopePtr& scope, const AstStatForIn& forin);
+    ControlFlow check(const ScopePtr& scope, TypeId ty, const ScopePtr& funScope, const AstStatFunction& function);
+    ControlFlow check(const ScopePtr& scope, TypeId ty, const ScopePtr& funScope, const AstStatLocalFunction& function);
+    ControlFlow check(const ScopePtr& scope, const AstStatTypeAlias& typealias);
+    ControlFlow check(const ScopePtr& scope, const AstStatDeclareClass& declaredClass);
+    ControlFlow check(const ScopePtr& scope, const AstStatDeclareFunction& declaredFunction);
 
-    void checkBlock(const ScopePtr& scope, const AstStatBlock& statement);
-    void checkBlockWithoutRecursionCheck(const ScopePtr& scope, const AstStatBlock& statement);
+    void prototype(const ScopePtr& scope, const AstStatTypeAlias& typealias, int subLevel = 0);
+    void prototype(const ScopePtr& scope, const AstStatDeclareClass& declaredClass);
+
+    ControlFlow checkBlock(const ScopePtr& scope, const AstStatBlock& statement);
+    ControlFlow checkBlockWithoutRecursionCheck(const ScopePtr& scope, const AstStatBlock& statement);
     void checkBlockTypeAliases(const ScopePtr& scope, std::vector<AstStat*>& sorted);
 
     WithPredicate<TypeId> checkExpr(
@@ -113,14 +131,14 @@ struct TypeChecker
         std::optional<TypeId> expectedType);
 
     // Returns the type of the lvalue.
-    TypeId checkLValue(const ScopePtr& scope, const AstExpr& expr);
+    TypeId checkLValue(const ScopePtr& scope, const AstExpr& expr, ValueContext ctx);
 
     // Returns the type of the lvalue.
-    TypeId checkLValueBinding(const ScopePtr& scope, const AstExpr& expr);
+    TypeId checkLValueBinding(const ScopePtr& scope, const AstExpr& expr, ValueContext ctx);
     TypeId checkLValueBinding(const ScopePtr& scope, const AstExprLocal& expr);
     TypeId checkLValueBinding(const ScopePtr& scope, const AstExprGlobal& expr);
-    TypeId checkLValueBinding(const ScopePtr& scope, const AstExprIndexName& expr);
-    TypeId checkLValueBinding(const ScopePtr& scope, const AstExprIndexExpr& expr);
+    TypeId checkLValueBinding(const ScopePtr& scope, const AstExprIndexName& expr, ValueContext ctx);
+    TypeId checkLValueBinding(const ScopePtr& scope, const AstExprIndexExpr& expr, ValueContext ctx);
 
     TypeId checkFunctionName(const ScopePtr& scope, AstExpr& funName, TypeLevel level);
     std::pair<TypeId, ScopePtr> checkFunctionSignature(const ScopePtr& scope, int subLevel, const AstExprFunction& expr,
@@ -134,17 +152,19 @@ struct TypeChecker
 
     WithPredicate<TypePackId> checkExprPackHelper(const ScopePtr& scope, const AstExpr& expr);
     WithPredicate<TypePackId> checkExprPackHelper(const ScopePtr& scope, const AstExprCall& expr);
+    WithPredicate<TypePackId> checkExprPackHelper2(
+        const ScopePtr& scope, const AstExprCall& expr, TypeId selfType, TypeId actualFunctionType, TypeId functionType, TypePackId retPack);
 
     std::vector<std::optional<TypeId>> getExpectedTypesForCall(const std::vector<TypeId>& overloads, size_t argumentCount, bool selfCall);
 
-    std::optional<WithPredicate<TypePackId>> checkCallOverload(const ScopePtr& scope, const AstExprCall& expr, TypeId fn, TypePackId retPack,
+    std::unique_ptr<WithPredicate<TypePackId>> checkCallOverload(const ScopePtr& scope, const AstExprCall& expr, TypeId fn, TypePackId retPack,
         TypePackId argPack, TypePack* args, const std::vector<Location>* argLocations, const WithPredicate<TypePackId>& argListResult,
         std::vector<TypeId>& overloadsThatMatchArgCount, std::vector<TypeId>& overloadsThatDont, std::vector<OverloadErrorEntry>& errors);
     bool handleSelfCallMismatch(const ScopePtr& scope, const AstExprCall& expr, TypePack* args, const std::vector<Location>& argLocations,
         const std::vector<OverloadErrorEntry>& errors);
     void reportOverloadResolutionError(const ScopePtr& scope, const AstExprCall& expr, TypePackId retPack, TypePackId argPack,
         const std::vector<Location>& argLocations, const std::vector<TypeId>& overloads, const std::vector<TypeId>& overloadsThatMatchArgCount,
-        const std::vector<OverloadErrorEntry>& errors);
+        std::vector<OverloadErrorEntry>& errors);
 
     WithPredicate<TypePackId> checkExprList(const ScopePtr& scope, const Location& location, const AstArray<AstExpr*>& exprs,
         bool substituteFreeForNil = false, const std::vector<bool>& lhsAnnotations = {},
@@ -157,7 +177,7 @@ struct TypeChecker
     // Reports an error if the type is already some kind of non-table.
     void tablify(TypeId type);
 
-    /** In nonstrict mode, many typevars need to be replaced by any.
+    /** In nonstrict mode, many types need to be replaced by any.
      */
     TypeId anyIfNonstrict(TypeId ty) const;
 
@@ -190,17 +210,11 @@ struct TypeChecker
     ErrorVec canUnify(TypeId subTy, TypeId superTy, const ScopePtr& scope, const Location& location);
     ErrorVec canUnify(TypePackId subTy, TypePackId superTy, const ScopePtr& scope, const Location& location);
 
-    void unifyLowerBound(TypePackId subTy, TypePackId superTy, TypeLevel demotedLevel, const ScopePtr& scope, const Location& location);
-
     std::optional<TypeId> findMetatableEntry(TypeId type, std::string entry, const Location& location, bool addErrors);
     std::optional<TypeId> findTablePropertyRespectingMeta(TypeId lhsType, Name name, const Location& location, bool addErrors);
 
     std::optional<TypeId> getIndexTypeFromType(const ScopePtr& scope, TypeId type, const Name& name, const Location& location, bool addErrors);
     std::optional<TypeId> getIndexTypeFromTypeImpl(const ScopePtr& scope, TypeId type, const Name& name, const Location& location, bool addErrors);
-
-    // Reduces the union to its simplest possible shape.
-    // (A | B) | B | C yields A | B | C
-    std::vector<TypeId> reduceUnion(const std::vector<TypeId>& types);
 
     std::optional<TypeId> tryStripUnionFromNil(TypeId ty);
     TypeId stripFromNilAndReport(TypeId ty, const Location& location);
@@ -232,12 +246,16 @@ public:
     TypeId anyify(const ScopePtr& scope, TypeId ty, Location location);
     TypePackId anyify(const ScopePtr& scope, TypePackId ty, Location location);
 
+    TypePackId anyifyModuleReturnTypePackGenerics(TypePackId ty);
+
     void reportError(const TypeError& error);
     void reportError(const Location& location, TypeErrorData error);
     void reportErrors(const ErrorVec& errors);
 
     [[noreturn]] void ice(const std::string& message, const Location& location);
     [[noreturn]] void ice(const std::string& message);
+    [[noreturn]] void throwTimeLimitError();
+    [[noreturn]] void throwUserCancelError();
 
     ScopePtr childFunctionScope(const ScopePtr& parent, const Location& location, int subLevel = 0);
     ScopePtr childScope(const ScopePtr& parent, const Location& location);
@@ -271,27 +289,27 @@ private:
     TypeId singletonType(bool value);
     TypeId singletonType(std::string value);
 
-    TypeIdPredicate mkTruthyPredicate(bool sense);
+    TypeIdPredicate mkTruthyPredicate(bool sense, TypeId emptySetTy);
 
     // TODO: Return TypeId only.
     std::optional<TypeId> filterMapImpl(TypeId type, TypeIdPredicate predicate);
     std::pair<std::optional<TypeId>, bool> filterMap(TypeId type, TypeIdPredicate predicate);
 
 public:
-    std::pair<std::optional<TypeId>, bool> pickTypesFromSense(TypeId type, bool sense);
+    std::pair<std::optional<TypeId>, bool> pickTypesFromSense(TypeId type, bool sense, TypeId emptySetTy);
 
 private:
     TypeId unionOfTypes(TypeId a, TypeId b, const ScopePtr& scope, const Location& location, bool unifyFreeTypes = true);
 
     // ex
-    //      TypeId id = addType(FreeTypeVar());
+    //      TypeId id = addType(FreeType());
     template<typename T>
     TypeId addType(const T& tv)
     {
-        return addTV(TypeVar(tv));
+        return addTV(Type(tv));
     }
 
-    TypeId addTV(TypeVar&& tv);
+    TypeId addTV(Type&& tv);
 
     TypePackId addTypePack(TypePackVar&& tp);
     TypePackId addTypePack(TypePack&& tp);
@@ -340,23 +358,21 @@ public:
      * Calling this function means submitting evidence that the pack must have the length provided.
      * If the pack is known not to have the correct length, an error will be reported.
      * The return vector is always of the exact requested length.  In the event that the pack's length does
-     * not match up, excess TypeIds will be ErrorTypeVars.
+     * not match up, excess TypeIds will be ErrorTypes.
      */
     std::vector<TypeId> unTypePack(const ScopePtr& scope, TypePackId pack, size_t expectedLength, const Location& location);
 
-    TypeArena globalTypes;
+    const ScopePtr& globalScope;
 
     ModuleResolver* resolver;
-    SourceModule globalNames; // names for symbols entered into globalScope
-    ScopePtr globalScope;     // shared by all modules
     ModulePtr currentModule;
-    ModuleName currentModuleName;
 
     std::function<void(const ModuleName&, const ScopePtr&)> prepareModuleScope;
-    NotNull<SingletonTypes> singletonTypes;
+    NotNull<BuiltinTypes> builtinTypes;
     InternalErrorReporter* iceHandler;
 
     UnifierSharedState unifierState;
+    Normalizer normalizer;
 
     std::vector<RequireCycle> requireCycles;
 
@@ -364,6 +380,8 @@ public:
     std::optional<double> finishTime;
     std::optional<int> instantiationChildLimit;
     std::optional<int> unifierIterationLimit;
+
+    std::shared_ptr<FrontendCancellationToken> cancellationToken;
 
 public:
     const TypeId nilType;
@@ -389,11 +407,20 @@ private:
      */
     DenseHashSet<std::pair<bool, Name>, HashBoolNamePair> duplicateTypeAliases;
 
+    /**
+     * A set of incorrect class definitions which is used to avoid a second-pass analysis.
+     */
+    DenseHashSet<const AstStatDeclareClass*> incorrectClassDefinitions{nullptr};
+
     std::vector<std::pair<TypeId, ScopePtr>> deferredQuantification;
 };
 
+using PrintLineProc = void (*)(const std::string&);
+
+extern PrintLineProc luauPrintLine;
+
 // Unit test hook
-void setPrintLine(void (*pl)(const std::string& s));
+void setPrintLine(PrintLineProc pl);
 void resetPrintLine();
 
 } // namespace Luau

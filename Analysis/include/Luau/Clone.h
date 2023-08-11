@@ -1,8 +1,9 @@
 // This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 #pragma once
 
+#include <Luau/NotNull.h>
 #include "Luau/TypeArena.h"
-#include "Luau/TypeVar.h"
+#include "Luau/Type.h"
 
 #include <unordered_map>
 
@@ -15,6 +16,8 @@ using SeenTypePacks = std::unordered_map<TypePackId, TypePackId>;
 
 struct CloneState
 {
+    NotNull<BuiltinTypes> builtinTypes;
+
     SeenTypes seenTypes;
     SeenTypePacks seenTypePacks;
 
@@ -24,7 +27,5 @@ struct CloneState
 TypePackId clone(TypePackId tp, TypeArena& dest, CloneState& cloneState);
 TypeId clone(TypeId tp, TypeArena& dest, CloneState& cloneState);
 TypeFun clone(const TypeFun& typeFun, TypeArena& dest, CloneState& cloneState);
-
-TypeId shallowClone(TypeId ty, TypeArena& dest, const TxnLog* log, bool alwaysClone = false);
 
 } // namespace Luau

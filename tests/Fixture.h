@@ -2,6 +2,8 @@
 #pragma once
 
 #include "Luau/Config.h"
+#include "Luau/Differ.h"
+#include "Luau/Error.h"
 #include "Luau/FileResolver.h"
 #include "Luau/Frontend.h"
 #include "Luau/IostreamHelpers.h"
@@ -10,59 +12,32 @@
 #include "Luau/ModuleResolver.h"
 #include "Luau/Scope.h"
 #include "Luau/ToString.h"
-#include "Luau/TypeInfer.h"
-#include "Luau/TypeVar.h"
+#include "Luau/Type.h"
 
 #include "IostreamOptional.h"
 #include "ScopedFlags.h"
 
-#include <iostream>
+#include "doctest.h"
 #include <string>
 #include <unordered_map>
-
 #include <optional>
 
 namespace Luau
 {
 
+struct TypeChecker;
+
 struct TestFileResolver
     : FileResolver
     , ModuleResolver
 {
-    std::optional<ModuleInfo> resolveModuleInfo(const ModuleName& currentModuleName, const AstExpr& pathExpr) override
-    {
-        if (auto name = pathExprToModuleName(currentModuleName, pathExpr))
-            return {{*name, false}};
+    std::optional<ModuleInfo> resolveModuleInfo(const ModuleName& currentModuleName, const AstExpr& pathExpr) override;
 
-        return std::nullopt;
-    }
+    const ModulePtr getModule(const ModuleName& moduleName) const override;
 
-    const ModulePtr getModule(const ModuleName& moduleName) const override
-    {
-        LUAU_ASSERT(false);
-        return nullptr;
-    }
+    bool moduleExists(const ModuleName& moduleName) const override;
 
-    bool moduleExists(const ModuleName& moduleName) const override
-    {
-        auto it = source.find(moduleName);
-        return (it != source.end());
-    }
-
-    std::optional<SourceCode> readSource(const ModuleName& name) override
-    {
-        auto it = source.find(name);
-        if (it == source.end())
-            return std::nullopt;
-
-        SourceCode::Type sourceType = SourceCode::Module;
-
-        auto it2 = sourceTypes.find(name);
-        if (it2 != sourceTypes.end())
-            sourceType = it2->second;
-
-        return SourceCode{it->second, sourceType};
-    }
+    std::optional<SourceCode> readSource(const ModuleName& name) override;
 
     std::optional<ModuleInfo> resolveModule(const ModuleInfo* context, AstExpr* expr) override;
 
@@ -80,14 +55,7 @@ struct TestConfigResolver : ConfigResolver
     Config defaultConfig;
     std::unordered_map<ModuleName, Config> configFiles;
 
-    const Config& getConfig(const ModuleName& name) const override
-    {
-        auto it = configFiles.find(name);
-        if (it != configFiles.end())
-            return it->second;
-
-        return defaultConfig;
-    }
+    const Config& getConfig(const ModuleName& name) const override;
 };
 
 struct Fixture
@@ -101,7 +69,7 @@ struct Fixture
     CheckResult check(const std::string& source);
 
     LintResult lint(const std::string& source, const std::optional<LintOptions>& lintOptions = {});
-    LintResult lintTyped(const std::string& source, const std::optional<LintOptions>& lintOptions = {});
+    LintResult lintModule(const ModuleName& moduleName, const std::optional<LintOptions>& lintOptions = {});
 
     /// Parse with all language extensions enabled
     ParseResult parseEx(const std::string& source, const ParseOptions& parseOptions = {});
@@ -113,7 +81,7 @@ struct Fixture
     ModulePtr getMainModule();
     SourceModule* getMainSourceModule();
 
-    std::optional<PrimitiveTypeVar::Type> getPrimitiveType(TypeId ty);
+    std::optional<PrimitiveType::Type> getPrimitiveType(TypeId ty);
     std::optional<TypeId> getType(const std::string& name);
     TypeId requireType(const std::string& name);
     TypeId requireType(const ModuleName& moduleName, const std::string& name);
@@ -126,9 +94,10 @@ struct Fixture
 
     std::optional<TypeId> lookupType(const std::string& name);
     std::optional<TypeId> lookupImportedType(const std::string& moduleAlias, const std::string& name);
+    TypeId requireTypeAlias(const std::string& name);
+    TypeId requireExportedType(const ModuleName& moduleName, const std::string& name);
 
     ScopedFastFlag sff_DebugLuauFreezeArena;
-    ScopedFastFlag sff_UnknownNever{"LuauUnknownAndNeverType", true};
 
     TestFileResolver fileResolver;
     TestConfigResolver configResolver;
@@ -136,8 +105,7 @@ struct Fixture
     std::unique_ptr<SourceModule> sourceModule;
     Frontend frontend;
     InternalErrorReporter ice;
-    TypeChecker& typeChecker;
-    NotNull<SingletonTypes> singletonTypes;
+    NotNull<BuiltinTypes> builtinTypes;
 
     std::string decorateWithTypes(const std::string& code);
 
@@ -185,6 +153,87 @@ void dump(const std::vector<Constraint>& constraints);
 std::optional<TypeId> lookupName(ScopePtr scope, const std::string& name); // Warning: This function runs in O(n**2)
 
 std::optional<TypeId> linearSearchForBinding(Scope* scope, const char* name);
+
+void registerHiddenTypes(Frontend* frontend);
+void createSomeClasses(Frontend* frontend);
+
+template<typename BaseFixture>
+struct DifferFixtureGeneric : BaseFixture
+{
+    std::string normalizeWhitespace(std::string msg)
+    {
+        std::string normalizedMsg = "";
+        bool wasWhitespace = true;
+        for (char c : msg)
+        {
+            bool isWhitespace = c == ' ' || c == '\n';
+            if (wasWhitespace && isWhitespace)
+                continue;
+            normalizedMsg += isWhitespace ? ' ' : c;
+            wasWhitespace = isWhitespace;
+        }
+        if (wasWhitespace)
+            normalizedMsg.pop_back();
+        return normalizedMsg;
+    }
+
+    void compareNe(TypeId left, TypeId right, const std::string& expectedMessage, bool multiLine)
+    {
+        compareNe(left, std::nullopt, right, std::nullopt, expectedMessage, multiLine);
+    }
+
+    void compareNe(TypeId left, std::optional<std::string> symbolLeft, TypeId right, std::optional<std::string> symbolRight,
+        const std::string& expectedMessage, bool multiLine)
+    {
+        std::string diffMessage;
+        try
+        {
+            DifferResult diffRes = diffWithSymbols(left, right, symbolLeft, symbolRight);
+            REQUIRE_MESSAGE(diffRes.diffError.has_value(), "Differ did not report type error, even though types are unequal");
+            diffMessage = diffRes.diffError->toString(multiLine);
+        }
+        catch (const InternalCompilerError& e)
+        {
+            REQUIRE_MESSAGE(false, ("InternalCompilerError: " + e.message));
+        }
+        CHECK_EQ(expectedMessage, diffMessage);
+    }
+
+    void compareTypesNe(const std::string& leftSymbol, const std::string& rightSymbol, const std::string& expectedMessage, bool forwardSymbol = false,
+        bool multiLine = false)
+    {
+        if (forwardSymbol)
+        {
+            compareNe(
+                BaseFixture::requireType(leftSymbol), leftSymbol, BaseFixture::requireType(rightSymbol), rightSymbol, expectedMessage, multiLine);
+        }
+        else
+        {
+            compareNe(
+                BaseFixture::requireType(leftSymbol), std::nullopt, BaseFixture::requireType(rightSymbol), std::nullopt, expectedMessage, multiLine);
+        }
+    }
+
+    void compareEq(TypeId left, TypeId right)
+    {
+        try
+        {
+            DifferResult diffRes = diff(left, right);
+            CHECK_MESSAGE(!diffRes.diffError.has_value(), diffRes.diffError->toString());
+        }
+        catch (const InternalCompilerError& e)
+        {
+            REQUIRE_MESSAGE(false, ("InternalCompilerError: " + e.message));
+        }
+    }
+
+    void compareTypesEq(const std::string& leftSymbol, const std::string& rightSymbol)
+    {
+        compareEq(BaseFixture::requireType(leftSymbol), BaseFixture::requireType(rightSymbol));
+    }
+};
+using DifferFixture = DifferFixtureGeneric<Fixture>;
+using DifferFixtureWithBuiltins = DifferFixtureGeneric<BuiltinsFixture>;
 
 } // namespace Luau
 

@@ -4,19 +4,20 @@
 #include "Luau/Module.h"
 #include "Luau/Scope.h"
 #include "Luau/TypeInfer.h"
-#include "Luau/TypeVar.h"
+#include "Luau/Type.h"
 #include "Luau/ToString.h"
 
 #include "Luau/Common.h"
 
 #include <algorithm>
 
+LUAU_FASTFLAG(DebugLuauReadWriteProperties)
+
 namespace Luau
 {
 
 namespace
 {
-
 
 struct AutocompleteNodeFinder : public AstVisitor
 {
@@ -30,7 +31,7 @@ struct AutocompleteNodeFinder : public AstVisitor
 
     bool visit(AstExpr* expr) override
     {
-        if (expr->location.begin < pos && pos <= expr->location.end)
+        if (expr->location.begin <= pos && pos <= expr->location.end)
         {
             ancestry.push_back(expr);
             return true;
@@ -170,14 +171,24 @@ struct FindFullAncestry final : public AstVisitor
     std::vector<AstNode*> nodes;
     Position pos;
     Position documentEnd;
+    bool includeTypes = false;
 
-    explicit FindFullAncestry(Position pos, Position documentEnd)
+    explicit FindFullAncestry(Position pos, Position documentEnd, bool includeTypes = false)
         : pos(pos)
         , documentEnd(documentEnd)
+        , includeTypes(includeTypes)
     {
     }
 
-    bool visit(AstNode* node)
+    bool visit(AstType* type) override
+    {
+        if (includeTypes)
+            return visit(static_cast<AstNode*>(type));
+        else
+            return false;
+    }
+
+    bool visit(AstNode* node) override
     {
         if (node->location.contains(pos))
         {
@@ -202,33 +213,48 @@ struct FindFullAncestry final : public AstVisitor
 
 std::vector<AstNode*> findAncestryAtPositionForAutocomplete(const SourceModule& source, Position pos)
 {
-    AutocompleteNodeFinder finder{pos, source.root};
-    source.root->visit(&finder);
+    return findAncestryAtPositionForAutocomplete(source.root, pos);
+}
+
+std::vector<AstNode*> findAncestryAtPositionForAutocomplete(AstStatBlock* root, Position pos)
+{
+    AutocompleteNodeFinder finder{pos, root};
+    root->visit(&finder);
     return finder.ancestry;
 }
 
-std::vector<AstNode*> findAstAncestryOfPosition(const SourceModule& source, Position pos)
+std::vector<AstNode*> findAstAncestryOfPosition(const SourceModule& source, Position pos, bool includeTypes)
 {
-    const Position end = source.root->location.end;
+    return findAstAncestryOfPosition(source.root, pos, includeTypes);
+}
+
+std::vector<AstNode*> findAstAncestryOfPosition(AstStatBlock* root, Position pos, bool includeTypes)
+{
+    const Position end = root->location.end;
     if (pos > end)
         pos = end;
 
-    FindFullAncestry finder(pos, end);
-    source.root->visit(&finder);
+    FindFullAncestry finder(pos, end, includeTypes);
+    root->visit(&finder);
     return finder.nodes;
 }
 
 AstNode* findNodeAtPosition(const SourceModule& source, Position pos)
 {
-    const Position end = source.root->location.end;
-    if (pos < source.root->location.begin)
-        return source.root;
+    return findNodeAtPosition(source.root, pos);
+}
+
+AstNode* findNodeAtPosition(AstStatBlock* root, Position pos)
+{
+    const Position end = root->location.end;
+    if (pos < root->location.begin)
+        return root;
 
     if (pos > end)
         pos = end;
 
     FindNode findNode{pos, end};
-    findNode.visit(source.root);
+    findNode.visit(root);
     return findNode.best;
 }
 
@@ -243,7 +269,8 @@ AstExpr* findExprAtPosition(const SourceModule& source, Position pos)
 
 ScopePtr findScopeAtPosition(const Module& module, Position pos)
 {
-    LUAU_ASSERT(!module.scopes.empty());
+    if (module.scopes.empty())
+        return nullptr;
 
     Location scopeLocation = module.scopes.front().first;
     ScopePtr scope = module.scopes.front().second;
@@ -307,7 +334,6 @@ std::optional<Binding> findBindingAtPosition(const Module& module, const SourceM
         return std::nullopt;
 
     ScopePtr currentScope = findScopeAtPosition(module, pos);
-    LUAU_ASSERT(currentScope);
 
     while (currentScope)
     {
@@ -427,6 +453,36 @@ ExprOrLocal findExprOrLocalAtPosition(const SourceModule& source, Position pos)
     return findVisitor.result;
 }
 
+static std::optional<DocumentationSymbol> checkOverloadedDocumentationSymbol(
+    const Module& module, const TypeId ty, const AstExpr* parentExpr, const std::optional<DocumentationSymbol> documentationSymbol)
+{
+    if (!documentationSymbol)
+        return std::nullopt;
+
+    // This might be an overloaded function.
+    if (get<IntersectionType>(follow(ty)))
+    {
+        TypeId matchingOverload = nullptr;
+        if (parentExpr && parentExpr->is<AstExprCall>())
+        {
+            if (auto it = module.astOverloadResolvedTypes.find(parentExpr))
+            {
+                matchingOverload = *it;
+            }
+        }
+
+        if (matchingOverload)
+        {
+            std::string overloadSymbol = *documentationSymbol + "/overload/";
+            // Default toString options are fine for this purpose.
+            overloadSymbol += toString(matchingOverload);
+            return overloadSymbol;
+        }
+    }
+
+    return documentationSymbol;
+}
+
 std::optional<DocumentationSymbol> getDocumentationSymbolAtPosition(const SourceModule& source, const Module& module, Position position)
 {
     std::vector<AstNode*> ancestry = findAstAncestryOfPosition(source, position);
@@ -435,33 +491,7 @@ std::optional<DocumentationSymbol> getDocumentationSymbolAtPosition(const Source
     AstExpr* parentExpr = ancestry.size() >= 2 ? ancestry[ancestry.size() - 2]->asExpr() : nullptr;
 
     if (std::optional<Binding> binding = findBindingAtPosition(module, source, position))
-    {
-        if (binding->documentationSymbol)
-        {
-            // This might be an overloaded function binding.
-            if (get<IntersectionTypeVar>(follow(binding->typeId)))
-            {
-                TypeId matchingOverload = nullptr;
-                if (parentExpr && parentExpr->is<AstExprCall>())
-                {
-                    if (auto it = module.astOverloadResolvedTypes.find(parentExpr))
-                    {
-                        matchingOverload = *it;
-                    }
-                }
-
-                if (matchingOverload)
-                {
-                    std::string overloadSymbol = *binding->documentationSymbol + "/overload/";
-                    // Default toString options are fine for this purpose.
-                    overloadSymbol += toString(matchingOverload);
-                    return overloadSymbol;
-                }
-            }
-        }
-
-        return binding->documentationSymbol;
-    }
+        return checkOverloadedDocumentationSymbol(module, binding->typeId, parentExpr, binding->documentationSymbol);
 
     if (targetExpr)
     {
@@ -470,18 +500,30 @@ std::optional<DocumentationSymbol> getDocumentationSymbolAtPosition(const Source
             if (auto it = module.astTypes.find(indexName->expr))
             {
                 TypeId parentTy = follow(*it);
-                if (const TableTypeVar* ttv = get<TableTypeVar>(parentTy))
+                if (const TableType* ttv = get<TableType>(parentTy))
                 {
                     if (auto propIt = ttv->props.find(indexName->index.value); propIt != ttv->props.end())
                     {
-                        return propIt->second.documentationSymbol;
+                        if (FFlag::DebugLuauReadWriteProperties)
+                        {
+                            if (auto ty = propIt->second.readType())
+                                return checkOverloadedDocumentationSymbol(module, *ty, parentExpr, propIt->second.documentationSymbol);
+                        }
+                        else
+                            return checkOverloadedDocumentationSymbol(module, propIt->second.type(), parentExpr, propIt->second.documentationSymbol);
                     }
                 }
-                else if (const ClassTypeVar* ctv = get<ClassTypeVar>(parentTy))
+                else if (const ClassType* ctv = get<ClassType>(parentTy))
                 {
                     if (auto propIt = ctv->props.find(indexName->index.value); propIt != ctv->props.end())
                     {
-                        return propIt->second.documentationSymbol;
+                        if (FFlag::DebugLuauReadWriteProperties)
+                        {
+                            if (auto ty = propIt->second.readType())
+                                return checkOverloadedDocumentationSymbol(module, *ty, parentExpr, propIt->second.documentationSymbol);
+                        }
+                        else
+                            return checkOverloadedDocumentationSymbol(module, propIt->second.type(), parentExpr, propIt->second.documentationSymbol);
                     }
                 }
             }

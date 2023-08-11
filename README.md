@@ -17,12 +17,22 @@ Luau is an embeddable language, but it also comes with two command-line tools by
 
 `luau-analyze` is a command-line type checker and linter; given a set of input files, it produces errors/warnings according to the file configuration, which can be customized by using `--!` comments in the files or [`.luaurc`](https://github.com/Roblox/luau/blob/master/rfcs/config-luaurc.md) files. For details please refer to [type checking]( https://luau-lang.org/typecheck) and [linting](https://luau-lang.org/lint) documentation.
 
-You can download the binaries from [a recent release](https://github.com/Roblox/luau/releases).
+# Installation
 
+You can install and run Luau by downloading the compiled binaries from [a recent release](https://github.com/Roblox/luau/releases); note that `luau` and `luau-analyze` binaries from the archives will need to be added to PATH or copied to a directory like `/usr/local/bin` on Linux/macOS.
 
-# Building
+Alternatively, you can use one of the packaged distributions (note that these are not maintained by Luau development team):
 
-To build Luau tools or tests yourself, you can use CMake on all platforms:
+- macOS: [Install Homebrew](https://docs.brew.sh/Installation) and run `brew install luau`
+- Arch Linux: From the AUR (Arch Linux User Repository), install one of these packages via a AUR helper or manually (by cloning their repo and using ``makepkg``): [luau](https://aur.archlinux.org/packages/luau) (manual build), [luau-git](https://aur.archlinux.org/packages/luau-git) (manual build by cloning this repo), or [luau-bin](https://aur.archlinux.org/packages/luau-bin) (pre-built binaries from releases)
+- Alpine Linux: [Enable community repositories](https://wiki.alpinelinux.org/w/index.php?title=Enable_Community_Repository) and run `apk add luau`
+- Gentoo Linux: Luau is [officially packaged by Gentoo](https://packages.gentoo.org/packages/dev-lang/luau) and can be installed using `emerge dev-lang/luau`. You may have to unmask the package first before installing it (which can be done by including the `--autounmask=y` option in the `emerge` command).
+
+After installing, you will want to validate the installation was successful by running the test case [here](https://luau-lang.org/getting-started).
+
+## Building
+
+On all platforms, you can use CMake to run the following commands to build Luau binaries from source:
 
 ```sh
 mkdir cmake && cd cmake
@@ -31,13 +41,13 @@ cmake --build . --target Luau.Repl.CLI --config RelWithDebInfo
 cmake --build . --target Luau.Analyze.CLI --config RelWithDebInfo
 ```
 
-Alternatively, on Linux/macOS you can use make:
+Alternatively, on Linux/macOS you can use `make`:
 
 ```sh
 make config=release luau luau-analyze
 ```
 
-To integrate Luau into your CMake application projects, at the minimum you'll need to depend on `Luau.Compiler` and `Luau.VM` projects. From there you need to create a new Luau state (using Lua 5.x API such as `lua_newstate`), compile source to bytecode and load it into the VM like this:
+To integrate Luau into your CMake application projects as a library, at the minimum you'll need to depend on `Luau.Compiler` and `Luau.VM` projects. From there you need to create a new Luau state (using Lua 5.x API such as `lua_newstate`), compile source to bytecode and load it into the VM like this:
 
 ```cpp
 // needs lua.h and luacode.h

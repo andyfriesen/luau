@@ -1,19 +1,23 @@
 // This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
-
 #pragma once
+
+#include "Luau/Ast.h"
+#include "Luau/Constraint.h"
+#include "Luau/ControlFlow.h"
+#include "Luau/DataFlowGraph.h"
+#include "Luau/Module.h"
+#include "Luau/ModuleResolver.h"
+#include "Luau/NotNull.h"
+#include "Luau/Refinement.h"
+#include "Luau/Symbol.h"
+#include "Luau/Type.h"
+#include "Luau/TypeUtils.h"
+#include "Luau/Variant.h"
+#include "Normalize.h"
 
 #include <memory>
 #include <vector>
 #include <unordered_map>
-
-#include "Luau/Ast.h"
-#include "Luau/Constraint.h"
-#include "Luau/Module.h"
-#include "Luau/ModuleResolver.h"
-#include "Luau/NotNull.h"
-#include "Luau/Symbol.h"
-#include "Luau/TypeVar.h"
-#include "Luau/Variant.h"
 
 namespace Luau
 {
@@ -23,6 +27,34 @@ using ScopePtr = std::shared_ptr<Scope>;
 
 struct DcrLogger;
 
+struct Inference
+{
+    TypeId ty = nullptr;
+    RefinementId refinement = nullptr;
+
+    Inference() = default;
+
+    explicit Inference(TypeId ty, RefinementId refinement = nullptr)
+        : ty(ty)
+        , refinement(refinement)
+    {
+    }
+};
+
+struct InferencePack
+{
+    TypePackId tp = nullptr;
+    std::vector<RefinementId> refinements;
+
+    InferencePack() = default;
+
+    explicit InferencePack(TypePackId tp, const std::vector<RefinementId>& refinements = {})
+        : tp(tp)
+        , refinements(refinements)
+    {
+    }
+};
+
 struct ConstraintGraphBuilder
 {
     // A list of all the scopes in the module. This vector holds ownership of the
@@ -30,40 +62,48 @@ struct ConstraintGraphBuilder
     // define the scope hierarchy.
     std::vector<std::pair<Location, ScopePtr>> scopes;
 
-    ModuleName moduleName;
     ModulePtr module;
-    NotNull<SingletonTypes> singletonTypes;
+    NotNull<BuiltinTypes> builtinTypes;
     const NotNull<TypeArena> arena;
     // The root scope of the module we're generating constraints for.
     // This is null when the CGB is initially constructed.
     Scope* rootScope;
-    // A mapping of AST node to TypeId.
-    DenseHashMap<const AstExpr*, TypeId> astTypes{nullptr};
-    // A mapping of AST node to TypePackId.
-    DenseHashMap<const AstExpr*, TypePackId> astTypePacks{nullptr};
-    DenseHashMap<const AstExpr*, TypeId> astOriginalCallTypes{nullptr};
-    // Types resolved from type annotations. Analogous to astTypes.
-    DenseHashMap<const AstType*, TypeId> astResolvedTypes{nullptr};
-    // Type packs resolved from type annotations. Analogous to astTypePacks.
-    DenseHashMap<const AstTypePack*, TypePackId> astResolvedTypePacks{nullptr};
-    // Defining scopes for AST nodes.
+
+    // Constraints that go straight to the solver.
+    std::vector<ConstraintPtr> constraints;
+
+    // Constraints that do not go to the solver right away.  Other constraints
+    // will enqueue them during solving.
+    std::vector<ConstraintPtr> unqueuedConstraints;
+
+    // The private scope of type aliases for which the type parameters belong to.
     DenseHashMap<const AstStatTypeAlias*, ScopePtr> astTypeAliasDefiningScopes{nullptr};
+
+    NotNull<const DataFlowGraph> dfg;
+    RefinementArena refinementArena;
 
     int recursionCount = 0;
 
     // It is pretty uncommon for constraint generation to itself produce errors, but it can happen.
     std::vector<TypeError> errors;
 
+    // Needed to be able to enable error-suppression preservation for immediate refinements.
+    NotNull<Normalizer> normalizer;
     // Needed to resolve modules to make 'require' import types properly.
     NotNull<ModuleResolver> moduleResolver;
     // Occasionally constraint generation needs to produce an ICE.
     const NotNull<InternalErrorReporter> ice;
 
     ScopePtr globalScope;
+
+    std::function<void(const ModuleName&, const ScopePtr&)> prepareModuleScope;
+    std::vector<RequireCycle> requireCycles;
+
     DcrLogger* logger;
 
-    ConstraintGraphBuilder(const ModuleName& moduleName, ModulePtr module, TypeArena* arena, NotNull<ModuleResolver> moduleResolver,
-        NotNull<SingletonTypes> singletonTypes, NotNull<InternalErrorReporter> ice, const ScopePtr& globalScope, DcrLogger* logger);
+    ConstraintGraphBuilder(ModulePtr module, NotNull<Normalizer> normalizer, NotNull<ModuleResolver> moduleResolver, NotNull<BuiltinTypes> builtinTypes,
+        NotNull<InternalErrorReporter> ice, const ScopePtr& globalScope, std::function<void(const ModuleName&, const ScopePtr&)> prepareModuleScope,
+        DcrLogger* logger, NotNull<DataFlowGraph> dfg, std::vector<RequireCycle> requireCycles);
 
     /**
      * Fabricates a new free type belonging to a given scope.
@@ -88,15 +128,19 @@ struct ConstraintGraphBuilder
      * Adds a new constraint with no dependencies to a given scope.
      * @param scope the scope to add the constraint to.
      * @param cv the constraint variant to add.
+     * @return the pointer to the inserted constraint
      */
-    void addConstraint(const ScopePtr& scope, const Location& location, ConstraintV cv);
+    NotNull<Constraint> addConstraint(const ScopePtr& scope, const Location& location, ConstraintV cv);
 
     /**
      * Adds a constraint to a given scope.
      * @param scope the scope to add the constraint to. Must not be null.
      * @param c the constraint to add.
+     * @return the pointer to the inserted constraint
      */
-    void addConstraint(const ScopePtr& scope, std::unique_ptr<Constraint> c);
+    NotNull<Constraint> addConstraint(const ScopePtr& scope, std::unique_ptr<Constraint> c);
+
+    void applyRefinements(const ScopePtr& scope, Location location, RefinementId refinement);
 
     /**
      * The entry point to the ConstraintGraphBuilder. This will construct a set
@@ -105,28 +149,31 @@ struct ConstraintGraphBuilder
      */
     void visit(AstStatBlock* block);
 
-    void visitBlockWithoutChildScope(const ScopePtr& scope, AstStatBlock* block);
+    ControlFlow visitBlockWithoutChildScope(const ScopePtr& scope, AstStatBlock* block);
 
-    void visit(const ScopePtr& scope, AstStat* stat);
-    void visit(const ScopePtr& scope, AstStatBlock* block);
-    void visit(const ScopePtr& scope, AstStatLocal* local);
-    void visit(const ScopePtr& scope, AstStatFor* for_);
-    void visit(const ScopePtr& scope, AstStatForIn* forIn);
-    void visit(const ScopePtr& scope, AstStatWhile* while_);
-    void visit(const ScopePtr& scope, AstStatRepeat* repeat);
-    void visit(const ScopePtr& scope, AstStatLocalFunction* function);
-    void visit(const ScopePtr& scope, AstStatFunction* function);
-    void visit(const ScopePtr& scope, AstStatReturn* ret);
-    void visit(const ScopePtr& scope, AstStatAssign* assign);
-    void visit(const ScopePtr& scope, AstStatCompoundAssign* assign);
-    void visit(const ScopePtr& scope, AstStatIf* ifStatement);
-    void visit(const ScopePtr& scope, AstStatTypeAlias* alias);
-    void visit(const ScopePtr& scope, AstStatDeclareGlobal* declareGlobal);
-    void visit(const ScopePtr& scope, AstStatDeclareClass* declareClass);
-    void visit(const ScopePtr& scope, AstStatDeclareFunction* declareFunction);
+    ControlFlow visit(const ScopePtr& scope, AstStat* stat);
+    ControlFlow visit(const ScopePtr& scope, AstStatBlock* block);
+    ControlFlow visit(const ScopePtr& scope, AstStatLocal* local);
+    ControlFlow visit(const ScopePtr& scope, AstStatFor* for_);
+    ControlFlow visit(const ScopePtr& scope, AstStatForIn* forIn);
+    ControlFlow visit(const ScopePtr& scope, AstStatWhile* while_);
+    ControlFlow visit(const ScopePtr& scope, AstStatRepeat* repeat);
+    ControlFlow visit(const ScopePtr& scope, AstStatLocalFunction* function);
+    ControlFlow visit(const ScopePtr& scope, AstStatFunction* function);
+    ControlFlow visit(const ScopePtr& scope, AstStatReturn* ret);
+    ControlFlow visit(const ScopePtr& scope, AstStatAssign* assign);
+    ControlFlow visit(const ScopePtr& scope, AstStatCompoundAssign* assign);
+    ControlFlow visit(const ScopePtr& scope, AstStatIf* ifStatement);
+    ControlFlow visit(const ScopePtr& scope, AstStatTypeAlias* alias);
+    ControlFlow visit(const ScopePtr& scope, AstStatDeclareGlobal* declareGlobal);
+    ControlFlow visit(const ScopePtr& scope, AstStatDeclareClass* declareClass);
+    ControlFlow visit(const ScopePtr& scope, AstStatDeclareFunction* declareFunction);
+    ControlFlow visit(const ScopePtr& scope, AstStatError* error);
 
-    TypePackId checkPack(const ScopePtr& scope, AstArray<AstExpr*> exprs, const std::vector<TypeId>& expectedTypes = {});
-    TypePackId checkPack(const ScopePtr& scope, AstExpr* expr, const std::vector<TypeId>& expectedTypes = {});
+    InferencePack checkPack(const ScopePtr& scope, AstArray<AstExpr*> exprs, const std::vector<std::optional<TypeId>>& expectedTypes = {});
+    InferencePack checkPack(const ScopePtr& scope, AstExpr* expr, const std::vector<std::optional<TypeId>>& expectedTypes = {});
+
+    InferencePack checkPack(const ScopePtr& scope, AstExprCall* call);
 
     /**
      * Checks an expression that is expected to evaluate to one type.
@@ -136,15 +183,27 @@ struct ConstraintGraphBuilder
      *      surrounding context.  Used to implement bidirectional type checking.
      * @return the type of the expression.
      */
-    TypeId check(const ScopePtr& scope, AstExpr* expr, std::optional<TypeId> expectedType = {});
+    Inference check(const ScopePtr& scope, AstExpr* expr, ValueContext context = ValueContext::RValue, std::optional<TypeId> expectedType = {},
+        bool forceSingleton = false);
 
-    TypeId check(const ScopePtr& scope, AstExprTable* expr, std::optional<TypeId> expectedType);
-    TypeId check(const ScopePtr& scope, AstExprIndexName* indexName);
-    TypeId check(const ScopePtr& scope, AstExprIndexExpr* indexExpr);
-    TypeId check(const ScopePtr& scope, AstExprUnary* unary);
-    TypeId check(const ScopePtr& scope, AstExprBinary* binary);
-    TypeId check(const ScopePtr& scope, AstExprIfElse* ifElse, std::optional<TypeId> expectedType);
-    TypeId check(const ScopePtr& scope, AstExprTypeAssertion* typeAssert);
+    Inference check(const ScopePtr& scope, AstExprConstantString* string, std::optional<TypeId> expectedType, bool forceSingleton);
+    Inference check(const ScopePtr& scope, AstExprConstantBool* bool_, std::optional<TypeId> expectedType, bool forceSingleton);
+    Inference check(const ScopePtr& scope, AstExprLocal* local, ValueContext context);
+    Inference check(const ScopePtr& scope, AstExprGlobal* global);
+    Inference check(const ScopePtr& scope, AstExprIndexName* indexName);
+    Inference check(const ScopePtr& scope, AstExprIndexExpr* indexExpr);
+    Inference check(const ScopePtr& scope, AstExprFunction* func, std::optional<TypeId> expectedType);
+    Inference check(const ScopePtr& scope, AstExprUnary* unary);
+    Inference check(const ScopePtr& scope, AstExprBinary* binary, std::optional<TypeId> expectedType);
+    Inference check(const ScopePtr& scope, AstExprIfElse* ifElse, std::optional<TypeId> expectedType);
+    Inference check(const ScopePtr& scope, AstExprTypeAssertion* typeAssert);
+    Inference check(const ScopePtr& scope, AstExprInterpString* interpString);
+    Inference check(const ScopePtr& scope, AstExprTable* expr, std::optional<TypeId> expectedType);
+    std::tuple<TypeId, TypeId, RefinementId> checkBinary(const ScopePtr& scope, AstExprBinary* binary, std::optional<TypeId> expectedType);
+
+    std::vector<TypeId> checkLValues(const ScopePtr& scope, AstArray<AstExpr*> exprs);
+
+    TypeId checkLValue(const ScopePtr& scope, AstExpr* expr);
 
     struct FunctionSignature
     {
@@ -159,7 +218,8 @@ struct ConstraintGraphBuilder
         ScopePtr bodyScope;
     };
 
-    FunctionSignature checkFunctionSignature(const ScopePtr& parent, AstExprFunction* fn);
+    FunctionSignature checkFunctionSignature(
+        const ScopePtr& parent, AstExprFunction* fn, std::optional<TypeId> expectedType = {}, std::optional<Location> originalName = {});
 
     /**
      * Checks the body of a function expression.
@@ -172,25 +232,56 @@ struct ConstraintGraphBuilder
      * Resolves a type from its AST annotation.
      * @param scope the scope that the type annotation appears within.
      * @param ty the AST annotation to resolve.
-     * @param topLevel whether the annotation is a "top-level" annotation.
+     * @param inTypeArguments whether we are resolving a type that's contained within type arguments, `<...>`.
      * @return the type of the AST annotation.
      **/
-    TypeId resolveType(const ScopePtr& scope, AstType* ty, bool topLevel = false);
+    TypeId resolveType(const ScopePtr& scope, AstType* ty, bool inTypeArguments, bool replaceErrorWithFresh = false);
 
     /**
      * Resolves a type pack from its AST annotation.
      * @param scope the scope that the type annotation appears within.
      * @param tp the AST annotation to resolve.
+     * @param inTypeArguments whether we are resolving a type that's contained within type arguments, `<...>`.
      * @return the type pack of the AST annotation.
      **/
-    TypePackId resolveTypePack(const ScopePtr& scope, AstTypePack* tp);
+    TypePackId resolveTypePack(const ScopePtr& scope, AstTypePack* tp, bool inTypeArguments, bool replaceErrorWithFresh = false);
 
-    TypePackId resolveTypePack(const ScopePtr& scope, const AstTypeList& list);
+    /**
+     * Resolves a type pack from its AST annotation.
+     * @param scope the scope that the type annotation appears within.
+     * @param list the AST annotation to resolve.
+     * @param inTypeArguments whether we are resolving a type that's contained within type arguments, `<...>`.
+     * @return the type pack of the AST annotation.
+     **/
+    TypePackId resolveTypePack(const ScopePtr& scope, const AstTypeList& list, bool inTypeArguments, bool replaceErrorWithFresh = false);
 
-    std::vector<std::pair<Name, GenericTypeDefinition>> createGenerics(const ScopePtr& scope, AstArray<AstGenericType> generics);
-    std::vector<std::pair<Name, GenericTypePackDefinition>> createGenericPacks(const ScopePtr& scope, AstArray<AstGenericTypePack> packs);
+    /**
+     * Creates generic types given a list of AST definitions, resolving default
+     * types as required.
+     * @param scope the scope that the generics should belong to.
+     * @param generics the AST generics to create types for.
+     * @param useCache whether to use the generic type cache for the given
+     * scope.
+     * @param addTypes whether to add the types to the scope's
+     * privateTypeBindings map.
+     **/
+    std::vector<std::pair<Name, GenericTypeDefinition>> createGenerics(
+        const ScopePtr& scope, AstArray<AstGenericType> generics, bool useCache = false, bool addTypes = true);
 
-    TypeId flattenPack(const ScopePtr& scope, Location location, TypePackId tp);
+    /**
+     * Creates generic type packs given a list of AST definitions, resolving
+     * default type packs as required.
+     * @param scope the scope that the generic packs should belong to.
+     * @param generics the AST generics to create type packs for.
+     * @param useCache whether to use the generic type pack cache for the given
+     * scope.
+     * @param addTypes whether to add the types to the scope's
+     * privateTypePackBindings map.
+     **/
+    std::vector<std::pair<Name, GenericTypePackDefinition>> createGenericPacks(
+        const ScopePtr& scope, AstArray<AstGenericTypePack> packs, bool useCache = false, bool addTypes = true);
+
+    Inference flattenPack(const ScopePtr& scope, Location location, InferencePack pack);
 
     void reportError(Location location, TypeErrorData err);
     void reportCodeTooComplex(Location location);
@@ -202,18 +293,17 @@ struct ConstraintGraphBuilder
      * initial scan of the AST and note what globals are defined.
      */
     void prepopulateGlobalScope(const ScopePtr& globalScope, AstStatBlock* program);
+
+    /** Given a function type annotation, return a vector describing the expected types of the calls to the function
+     *  For example, calling a function with annotation ((number) -> string & ((string) -> number))
+     *  yields a vector of size 1, with value: [number | string]
+     */
+    std::vector<std::optional<TypeId>> getExpectedCallTypesForFunctionOverloads(const TypeId fnType);
 };
 
-/**
- * Collects a vector of borrowed constraints from the scope and all its child
- * scopes. It is important to only call this function when you're done adding
- * constraints to the scope or its descendants, lest the borrowed pointers
- * become invalid due to a container reallocation.
- * @param rootScope the root scope of the scope graph to collect constraints
- * from.
- * @return a list of pointers to constraints contained within the scope graph.
- * None of these pointers should be null.
+/** Borrow a vector of pointers from a vector of owning pointers to constraints.
  */
-std::vector<NotNull<Constraint>> collectConstraints(NotNull<Scope> rootScope);
+std::vector<NotNull<Constraint>> borrowConstraints(const std::vector<ConstraintPtr>& constraints);
+
 
 } // namespace Luau

@@ -38,7 +38,7 @@ int luaV_tostring(lua_State* L, StkId obj)
         double n = nvalue(obj);
         char* e = luai_num2str(s, n);
         LUAU_ASSERT(e < s + sizeof(s));
-        setsvalue2s(L, obj, luaS_newlstr(L, s, e - s));
+        setsvalue(L, obj, luaS_newlstr(L, s, e - s));
         return 1;
     }
 }
@@ -70,7 +70,7 @@ static StkId callTMres(lua_State* L, StkId res, const TValue* f, const TValue* p
     luaD_call(L, L->top - 3, 1);
     res = restorestack(L, result);
     L->top--;
-    setobjs2s(L, res, L->top);
+    setobj2s(L, res, L->top);
     return res;
 }
 
@@ -201,15 +201,23 @@ static const TValue* get_compTM(lua_State* L, Table* mt1, Table* mt2, TMS event)
     return NULL;
 }
 
-static int call_orderTM(lua_State* L, const TValue* p1, const TValue* p2, TMS event)
+static int call_orderTM(lua_State* L, const TValue* p1, const TValue* p2, TMS event, bool error = false)
 {
     const TValue* tm1 = luaT_gettmbyobj(L, p1, event);
     const TValue* tm2;
     if (ttisnil(tm1))
+    {
+        if (error)
+            luaG_ordererror(L, p1, p2, event);
         return -1; // no metamethod?
+    }
     tm2 = luaT_gettmbyobj(L, p2, event);
     if (!luaO_rawequalObj(tm1, tm2)) // different metamethods?
+    {
+        if (error)
+            luaG_ordererror(L, p1, p2, event);
         return -1;
+    }
     callTMres(L, L->top, tm1, p1, p2);
     return !l_isfalse(L->top);
 }
@@ -220,8 +228,13 @@ int luaV_strcmp(const TString* ls, const TString* rs)
         return 0;
 
     const char* l = getstr(ls);
-    size_t ll = ls->len;
     const char* r = getstr(rs);
+
+    // always safe to read one character because even empty strings are nul terminated
+    if (*l != *r)
+        return uint8_t(*l) - uint8_t(*r);
+
+    size_t ll = ls->len;
     size_t lr = rs->len;
     size_t lmin = ll < lr ? ll : lr;
 
@@ -234,16 +247,14 @@ int luaV_strcmp(const TString* ls, const TString* rs)
 
 int luaV_lessthan(lua_State* L, const TValue* l, const TValue* r)
 {
-    int res;
-    if (ttype(l) != ttype(r))
+    if (LUAU_UNLIKELY(ttype(l) != ttype(r)))
         luaG_ordererror(L, l, r, TM_LT);
-    else if (ttisnumber(l))
+    else if (LUAU_LIKELY(ttisnumber(l)))
         return luai_numlt(nvalue(l), nvalue(r));
     else if (ttisstring(l))
         return luaV_strcmp(tsvalue(l), tsvalue(r)) < 0;
-    else if ((res = call_orderTM(L, l, r, TM_LT)) == -1)
-        luaG_ordererror(L, l, r, TM_LT);
-    return res;
+    else
+        return call_orderTM(L, l, r, TM_LT, /* error= */ true);
 }
 
 int luaV_lessequal(lua_State* L, const TValue* l, const TValue* r)
@@ -350,11 +361,11 @@ void luaV_concat(lua_State* L, int total, int last)
 
             if (tl < LUA_BUFFERSIZE)
             {
-                setsvalue2s(L, top - n, luaS_newlstr(L, buffer, tl));
+                setsvalue(L, top - n, luaS_newlstr(L, buffer, tl));
             }
             else
             {
-                setsvalue2s(L, top - n, luaS_buffinish(L, ts));
+                setsvalue(L, top - n, luaS_buffinish(L, ts));
             }
         }
         total -= n - 1; // got `n' strings to create 1 new
@@ -582,7 +593,7 @@ LUAU_NOINLINE void luaV_tryfuncTM(lua_State* L, StkId func)
     if (!ttisfunction(tm))
         luaG_typeerror(L, func, "call");
     for (StkId p = L->top; p > func; p--) // open space for metamethod
-        setobjs2s(L, p, p - 1);
+        setobj2s(L, p, p - 1);
     L->top++;              // stack space pre-allocated by the caller
     setobj2s(L, func, tm); // tag method is the new function to be called
 }

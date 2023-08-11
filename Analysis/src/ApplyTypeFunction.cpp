@@ -2,8 +2,6 @@
 
 #include "Luau/ApplyTypeFunction.h"
 
-LUAU_FASTFLAG(LuauClassTypeVarsInSubstitution)
-
 namespace Luau
 {
 
@@ -11,7 +9,7 @@ bool ApplyTypeFunction::isDirty(TypeId ty)
 {
     if (typeArguments.count(ty))
         return true;
-    else if (const FreeTypeVar* ftv = get<FreeTypeVar>(ty))
+    else if (const FreeType* ftv = get<FreeType>(ty))
     {
         if (ftv->forwardedTypeAlias)
             encounteredForwardedType = true;
@@ -31,9 +29,9 @@ bool ApplyTypeFunction::isDirty(TypePackId tp)
 
 bool ApplyTypeFunction::ignoreChildren(TypeId ty)
 {
-    if (get<GenericTypeVar>(ty))
+    if (get<GenericType>(ty))
         return true;
-    else if (FFlag::LuauClassTypeVarsInSubstitution && get<ClassTypeVar>(ty))
+    else if (get<ClassType>(ty))
         return true;
     else
         return false;

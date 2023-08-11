@@ -6,8 +6,6 @@
 
 #include <limits.h>
 
-LUAU_FASTFLAG(LuauInterpolatedStringBaseSupport)
-
 namespace Luau
 {
 
@@ -641,9 +639,8 @@ Lexeme Lexer::readInterpolatedStringSection(Position start, Lexeme::Type formatT
                 return brokenDoubleBrace;
             }
 
-            Lexeme lexemeOutput(Location(start, position()), Lexeme::InterpStringBegin, &buffer[startOffset], offset - startOffset);
             consume();
-            return lexemeOutput;
+            return Lexeme(Location(start, position()), formatType, &buffer[startOffset], offset - startOffset - 1);
         }
 
         default:
@@ -835,13 +832,7 @@ Lexeme Lexer::readNext()
         return readQuotedString();
 
     case '`':
-        if (FFlag::LuauInterpolatedStringBaseSupport)
-            return readInterpolatedStringBegin();
-        else
-        {
-            consume();
-            return Lexeme(Location(start, 1), '`');
-        }
+        return readInterpolatedStringBegin();
 
     case '.':
         consume();

@@ -54,4 +54,32 @@ breakpoint(49, false) -- validate that disabling breakpoints works
 
 bar()
 
+local function breakpointSetFromMetamethod()
+	local a = setmetatable({}, {
+		__index = function()
+			breakpoint(67)
+			return 2
+		end
+	})
+
+	local b = a.x
+
+	assert(b == 2)
+end
+
+breakpointSetFromMetamethod()
+
+-- break inside function with non-monotonic line info
+local function cond(a)
+	if a then
+		print('a')
+	else
+		print('not a')
+	end
+end
+
+breakpoint(77)
+
+pcall(cond, nil) -- prevent inlining
+
 return 'OK'

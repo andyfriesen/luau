@@ -374,19 +374,19 @@ Concatenate all elements of `a` with indices in range `[f..t]` together, using `
 function table.foreach<K, V, R>(t: { [K]: V }, f: (K, V) -> R?): R?
 ```
 
-Iterates over all elements of the table in unspecified order; for each key-value pair, calls `f` and returns the result of `f` if it's non-nil. If all invocations of `f` returned `nil`, returns no values.
+Iterates over all elements of the table in unspecified order; for each key-value pair, calls `f` and returns the result of `f` if it's non-nil. If all invocations of `f` returned `nil`, returns no values. This function has been deprecated and is not recommended for use in new code; use `for` loop instead.
 
 ```
 function table.foreachi<V, R>(t: {V}, f: (number, V) -> R?): R?
 ```
 
-Iterates over numeric keys of the table in `[1..#t]` range in order; for each key-value pair, calls `f` and returns the result of `f` if it's non-nil. If all invocations of `f` returned `nil`, returns no values.
+Iterates over numeric keys of the table in `[1..#t]` range in order; for each key-value pair, calls `f` and returns the result of `f` if it's non-nil. If all invocations of `f` returned `nil`, returns no values. This function has been deprecated and is not recommended for use in new code; use `for` loop instead.
 
 ```
 function table.getn<V>(t: {V}): number
 ```
 
-Returns the length of table `t` (equivalent to `#t`).
+Returns the length of table `t`. This function has been deprecated and is not recommended for use in new code; use `#t` instead.
 
 ```
 function table.maxn<V>(t: {V}): number
@@ -403,11 +403,12 @@ When using a two-argument version, appends the value to the array portion of the
 When using a three-argument version, inserts the value at index `i` and shifts values at indices after that by 1. `i` should be in `[1..#t]` range.
 
 ```
-function table.remove<V>(t: {V}, i: number?)
+function table.remove<V>(t: {V}, i: number?): V?
 ```
 
 Removes element `i` from the table and shifts values at indices after that by 1. If `i` is not specified, removes the last element of the table.
 `i` should be in `[1..#t]` range.
+Returns the value of the removed element, or `nil` if no element was removed (e.g. table was empty).
 
 ```
 function table.sort<V>(t: {V}, f: ((V, V) -> boolean)?)

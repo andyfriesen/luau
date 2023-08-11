@@ -2,8 +2,9 @@
 #pragma once
 
 #include "Luau/Common.h"
-#include "Luau/Condition.h"
+#include "Luau/DenseHash.h"
 #include "Luau/Label.h"
+#include "Luau/ConditionX64.h"
 #include "Luau/OperandX64.h"
 #include "Luau/RegisterX64.h"
 
@@ -14,10 +15,34 @@ namespace Luau
 {
 namespace CodeGen
 {
+namespace X64
+{
+
+enum class RoundingModeX64
+{
+    RoundToNearestEven = 0b00,
+    RoundToNegativeInfinity = 0b01,
+    RoundToPositiveInfinity = 0b10,
+    RoundToZero = 0b11,
+};
+
+enum class AlignmentDataX64
+{
+    Nop,
+    Int3,
+    Ud2, // int3 will be used as a fall-back if it doesn't fit
+};
+
+enum class ABIX64
+{
+    Windows,
+    SystemV,
+};
 
 class AssemblyBuilderX64
 {
 public:
+    explicit AssemblyBuilderX64(bool logText, ABIX64 abi);
     explicit AssemblyBuilderX64(bool logText);
     ~AssemblyBuilderX64();
 
@@ -34,6 +59,8 @@ public:
     void sar(OperandX64 lhs, OperandX64 rhs);
     void shl(OperandX64 lhs, OperandX64 rhs);
     void shr(OperandX64 lhs, OperandX64 rhs);
+    void rol(OperandX64 lhs, OperandX64 rhs);
+    void ror(OperandX64 lhs, OperandX64 rhs);
 
     // Two operand mov instruction has additional specialized encodings
     void mov(OperandX64 lhs, OperandX64 rhs);
@@ -48,6 +75,8 @@ public:
     void imul(OperandX64 op);
     void neg(OperandX64 op);
     void not_(OperandX64 op);
+    void dec(OperandX64 op);
+    void inc(OperandX64 op);
 
     // Additional forms of imul
     void imul(OperandX64 lhs, OperandX64 rhs);
@@ -55,20 +84,31 @@ public:
 
     void test(OperandX64 lhs, OperandX64 rhs);
     void lea(OperandX64 lhs, OperandX64 rhs);
+    void setcc(ConditionX64 cond, OperandX64 op);
 
     void push(OperandX64 op);
     void pop(OperandX64 op);
     void ret();
 
     // Control flow
-    void jcc(Condition cond, Label& label);
+    void jcc(ConditionX64 cond, Label& label);
     void jmp(Label& label);
     void jmp(OperandX64 op);
 
     void call(Label& label);
     void call(OperandX64 op);
 
+    void lea(RegisterX64 lhs, Label& label);
+
     void int3();
+    void ud2();
+
+    void bsr(RegisterX64 dst, OperandX64 src);
+    void bsf(RegisterX64 dst, OperandX64 src);
+
+    // Code alignment
+    void nop(uint32_t length = 1);
+    void align(uint32_t alignment, AlignmentDataX64 data = AlignmentDataX64::Nop);
 
     // AVX
     void vaddpd(OperandX64 dst, OperandX64 src1, OperandX64 src2);
@@ -80,15 +120,19 @@ public:
     void vmulsd(OperandX64 dst, OperandX64 src1, OperandX64 src2);
     void vdivsd(OperandX64 dst, OperandX64 src1, OperandX64 src2);
 
-    void vxorpd(OperandX64 dst, OperandX64 src1, OperandX64 src2);
+    void vandpd(OperandX64 dst, OperandX64 src1, OperandX64 src2);
+    void vandnpd(OperandX64 dst, OperandX64 src1, OperandX64 src2);
 
-    void vcomisd(OperandX64 src1, OperandX64 src2);
+    void vxorpd(OperandX64 dst, OperandX64 src1, OperandX64 src2);
+    void vorpd(OperandX64 dst, OperandX64 src1, OperandX64 src2);
+
     void vucomisd(OperandX64 src1, OperandX64 src2);
 
     void vcvttsd2si(OperandX64 dst, OperandX64 src);
     void vcvtsi2sd(OperandX64 dst, OperandX64 src1, OperandX64 src2);
+    void vcvtsd2ss(OperandX64 dst, OperandX64 src1, OperandX64 src2);
 
-    void vroundsd(OperandX64 dst, OperandX64 src1, OperandX64 src2, uint8_t mode);
+    void vroundsd(OperandX64 dst, OperandX64 src1, OperandX64 src2, RoundingModeX64 roundingMode); // inexact
 
     void vsqrtpd(OperandX64 dst, OperandX64 src);
     void vsqrtps(OperandX64 dst, OperandX64 src);
@@ -103,9 +147,18 @@ public:
     void vmovaps(OperandX64 dst, OperandX64 src);
     void vmovupd(OperandX64 dst, OperandX64 src);
     void vmovups(OperandX64 dst, OperandX64 src);
+    void vmovq(OperandX64 lhs, OperandX64 rhs);
+
+    void vmaxsd(OperandX64 dst, OperandX64 src1, OperandX64 src2);
+    void vminsd(OperandX64 dst, OperandX64 src1, OperandX64 src2);
+
+    void vcmpltsd(OperandX64 dst, OperandX64 src1, OperandX64 src2);
+
+    void vblendvpd(RegisterX64 dst, RegisterX64 src1, OperandX64 mask, RegisterX64 src3);
+
 
     // Run final checks
-    void finalize();
+    bool finalize();
 
     // Places a label at current location and returns it
     Label setLabel();
@@ -113,12 +166,24 @@ public:
     // Assigns label position to the current location
     void setLabel(Label& label);
 
+    // Extracts code offset (in bytes) from label
+    uint32_t getLabelOffset(const Label& label)
+    {
+        LUAU_ASSERT(label.location != ~0u);
+        return label.location;
+    }
+
     // Constant allocation (uses rip-relative addressing)
     OperandX64 i64(int64_t value);
     OperandX64 f32(float value);
     OperandX64 f64(double value);
     OperandX64 f32x4(float x, float y, float z, float w);
+    OperandX64 f64x2(double x, double y);
     OperandX64 bytes(const void* ptr, size_t size, size_t align = 8);
+
+    void logAppend(const char* fmt, ...) LUAU_PRINTF_ATTR(2, 3);
+
+    uint32_t getCodeSize() const;
 
     // Resulting data and code that need to be copied over one after the other
     // The *end* of 'data' has to be aligned to 16 bytes, this will also align 'code'
@@ -126,6 +191,10 @@ public:
     std::vector<uint8_t> code;
 
     std::string text;
+
+    const bool logText = false;
+
+    const ABIX64 abi;
 
 private:
     // Instruction archetypes
@@ -148,10 +217,11 @@ private:
         const char* name, OperandX64 dst, OperandX64 src1, OperandX64 src2, uint8_t imm8, uint8_t code, bool setW, uint8_t mode, uint8_t prefix);
 
     // Instruction components
-    void placeRegAndModRegMem(OperandX64 lhs, OperandX64 rhs);
-    void placeModRegMem(OperandX64 rhs, uint8_t regop);
+    void placeRegAndModRegMem(OperandX64 lhs, OperandX64 rhs, int32_t extraCodeBytes = 0);
+    void placeModRegMem(OperandX64 rhs, uint8_t regop, int32_t extraCodeBytes = 0);
     void placeRex(RegisterX64 op);
     void placeRex(OperandX64 op);
+    void placeRexNoW(OperandX64 op);
     void placeRex(RegisterX64 lhs, OperandX64 rhs);
     void placeVex(OperandX64 dst, OperandX64 src1, OperandX64 src2, bool setW, uint8_t mode, uint8_t prefix);
     void placeImm8Or32(int32_t imm);
@@ -163,7 +233,6 @@ private:
 
     void commit();
     LUAU_NOINLINE void extend();
-    uint32_t getCodeSize();
 
     // Data
     size_t allocateData(size_t size, size_t align);
@@ -176,17 +245,18 @@ private:
     LUAU_NOINLINE void log(const char* opcode, OperandX64 op1, OperandX64 op2, OperandX64 op3, OperandX64 op4);
     LUAU_NOINLINE void log(Label label);
     LUAU_NOINLINE void log(const char* opcode, Label label);
+    LUAU_NOINLINE void log(const char* opcode, RegisterX64 reg, Label label);
     void log(OperandX64 op);
-    void logAppend(const char* fmt, ...);
 
-    const char* getSizeName(SizeX64 size);
-    const char* getRegisterName(RegisterX64 reg);
+    const char* getSizeName(SizeX64 size) const;
+    const char* getRegisterName(RegisterX64 reg) const;
 
     uint32_t nextLabel = 1;
     std::vector<Label> pendingLabels;
     std::vector<uint32_t> labelLocations;
 
-    bool logText = false;
+    DenseHashMap<uint64_t, int32_t> constCache64;
+
     bool finalized = false;
 
     size_t dataPos = 0;
@@ -195,5 +265,6 @@ private:
     uint8_t* codeEnd = nullptr;
 };
 
+} // namespace X64
 } // namespace CodeGen
 } // namespace Luau

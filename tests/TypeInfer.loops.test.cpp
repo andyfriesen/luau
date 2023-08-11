@@ -2,10 +2,11 @@
 
 #include "Luau/AstQuery.h"
 #include "Luau/BuiltinDefinitions.h"
+#include "Luau/Frontend.h"
 #include "Luau/Scope.h"
 #include "Luau/TypeInfer.h"
-#include "Luau/TypeVar.h"
-#include "Luau/VisitTypeVar.h"
+#include "Luau/Type.h"
+#include "Luau/VisitType.h"
 
 #include "Fixture.h"
 
@@ -13,7 +14,6 @@
 
 using namespace Luau;
 
-LUAU_FASTFLAG(LuauSpecialTypesAsterisked)
 LUAU_FASTFLAG(DebugLuauDeferredConstraintResolution)
 
 TEST_SUITE_BEGIN("TypeInferLoops");
@@ -29,7 +29,77 @@ TEST_CASE_FIXTURE(Fixture, "for_loop")
 
     LUAU_REQUIRE_NO_ERRORS(result);
 
-    CHECK_EQ(*typeChecker.numberType, *requireType("q"));
+    CHECK_EQ(*builtinTypes->numberType, *requireType("q"));
+}
+
+TEST_CASE_FIXTURE(BuiltinsFixture, "iteration_no_table_passed")
+{
+    ScopedFastFlag sff{"DebugLuauDeferredConstraintResolution", true};
+    CheckResult result = check(R"(
+
+type Iterable = typeof(setmetatable(
+    {},
+    {}::{
+        __iter: (self: Iterable) -> (any, number) -> (number, string)
+    }
+))
+
+local t: Iterable
+
+for a, b in t do end
+)");
+
+
+    LUAU_REQUIRE_ERROR_COUNT(1, result);
+    GenericError* ge = get<GenericError>(result.errors[0]);
+    REQUIRE(ge);
+    CHECK_EQ("__iter metamethod must return (next[, table[, state]])", ge->message);
+}
+
+TEST_CASE_FIXTURE(BuiltinsFixture, "iteration_regression_issue_69967")
+{
+    ScopedFastFlag sff{"DebugLuauDeferredConstraintResolution", true};
+    CheckResult result = check(R"(
+        type Iterable = typeof(setmetatable(
+            {},
+            {}::{
+                __iter: (self: Iterable) -> () -> (number, string)
+            }
+        ))
+
+        local t: Iterable
+
+        for a, b in t do end
+    )");
+
+    LUAU_REQUIRE_NO_ERRORS(result);
+}
+
+TEST_CASE_FIXTURE(BuiltinsFixture, "iteration_regression_issue_69967_alt")
+{
+    if (!FFlag::DebugLuauDeferredConstraintResolution)
+        return;
+
+    CheckResult result = check(R"(
+        type Iterable = typeof(setmetatable(
+            {},
+            {}::{
+                __iter: (self: Iterable) -> () -> (number, string)
+            }
+        ))
+
+        local t: Iterable
+        local x, y
+
+        for a, b in t do
+            x = a
+            y = b
+        end
+    )");
+
+    LUAU_REQUIRE_NO_ERRORS(result);
+    CHECK_EQ("number", toString(requireType("x")));
+    CHECK_EQ("string", toString(requireType("y")));
 }
 
 TEST_CASE_FIXTURE(BuiltinsFixture, "for_in_loop")
@@ -45,8 +115,8 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "for_in_loop")
 
     LUAU_REQUIRE_NO_ERRORS(result);
 
-    CHECK_EQ(*typeChecker.numberType, *requireType("n"));
-    CHECK_EQ(*typeChecker.stringType, *requireType("s"));
+    CHECK_EQ(*builtinTypes->numberType, *requireType("n"));
+    CHECK_EQ(*builtinTypes->stringType, *requireType("s"));
 }
 
 TEST_CASE_FIXTURE(BuiltinsFixture, "for_in_loop_with_next")
@@ -62,8 +132,8 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "for_in_loop_with_next")
 
     LUAU_REQUIRE_NO_ERRORS(result);
 
-    CHECK_EQ(*typeChecker.numberType, *requireType("n"));
-    CHECK_EQ(*typeChecker.stringType, *requireType("s"));
+    CHECK_EQ(*builtinTypes->numberType, *requireType("n"));
+    CHECK_EQ(*builtinTypes->stringType, *requireType("s"));
 }
 
 TEST_CASE_FIXTURE(Fixture, "for_in_with_an_iterator_of_type_any")
@@ -157,10 +227,7 @@ TEST_CASE_FIXTURE(Fixture, "for_in_loop_on_error")
     LUAU_REQUIRE_ERROR_COUNT(2, result);
 
     TypeId p = requireType("p");
-    if (FFlag::LuauSpecialTypesAsterisked)
-        CHECK_EQ("*error-type*", toString(p));
-    else
-        CHECK_EQ("<error-type>", toString(p));
+    CHECK_EQ("*error-type*", toString(p));
 }
 
 TEST_CASE_FIXTURE(Fixture, "for_in_loop_on_non_function")
@@ -222,8 +289,8 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "for_in_loop_error_on_factory_not_returning_t
 
     TypeMismatch* tm = get<TypeMismatch>(result.errors[1]);
     REQUIRE(tm);
-    CHECK_EQ(typeChecker.numberType, tm->wantedType);
-    CHECK_EQ(typeChecker.stringType, tm->givenType);
+    CHECK_EQ(builtinTypes->numberType, tm->wantedType);
+    CHECK_EQ(builtinTypes->stringType, tm->givenType);
 }
 
 TEST_CASE_FIXTURE(BuiltinsFixture, "for_in_loop_error_on_iterator_requiring_args_but_none_given")
@@ -285,8 +352,8 @@ TEST_CASE_FIXTURE(Fixture, "for_in_loop_with_custom_iterator")
 
     TypeMismatch* tm = get<TypeMismatch>(result.errors[0]);
     REQUIRE(tm);
-    CHECK_EQ(typeChecker.numberType, tm->wantedType);
-    CHECK_EQ(typeChecker.stringType, tm->givenType);
+    CHECK_EQ(builtinTypes->numberType, tm->wantedType);
+    CHECK_EQ(builtinTypes->stringType, tm->givenType);
 }
 
 TEST_CASE_FIXTURE(Fixture, "while_loop")
@@ -300,7 +367,7 @@ TEST_CASE_FIXTURE(Fixture, "while_loop")
 
     LUAU_REQUIRE_NO_ERRORS(result);
 
-    CHECK_EQ(*typeChecker.numberType, *requireType("i"));
+    CHECK_EQ(*builtinTypes->numberType, *requireType("i"));
 }
 
 TEST_CASE_FIXTURE(Fixture, "repeat_loop")
@@ -314,7 +381,7 @@ TEST_CASE_FIXTURE(Fixture, "repeat_loop")
 
     LUAU_REQUIRE_NO_ERRORS(result);
 
-    CHECK_EQ(*typeChecker.stringType, *requireType("i"));
+    CHECK_EQ(*builtinTypes->stringType, *requireType("i"));
 }
 
 TEST_CASE_FIXTURE(Fixture, "repeat_loop_condition_binds_to_its_block")
@@ -526,6 +593,16 @@ TEST_CASE_FIXTURE(Fixture, "fuzz_fail_missing_instantitation_follow")
     )");
 }
 
+TEST_CASE_FIXTURE(BuiltinsFixture, "for_in_with_generic_next")
+{
+    CheckResult result = check(R"(
+        for k: number, v: number in next, {1, 2, 3} do
+        end
+    )");
+
+    LUAU_REQUIRE_NO_ERRORS(result);
+}
+
 TEST_CASE_FIXTURE(Fixture, "loop_iter_basic")
 {
     CheckResult result = check(R"(
@@ -541,7 +618,7 @@ TEST_CASE_FIXTURE(Fixture, "loop_iter_basic")
     )");
 
     LUAU_REQUIRE_NO_ERRORS(result);
-    CHECK_EQ(*typeChecker.numberType, *requireType("key"));
+    CHECK_EQ(*builtinTypes->numberType, *requireType("key"));
 }
 
 TEST_CASE_FIXTURE(Fixture, "loop_iter_trailing_nil")
@@ -555,7 +632,7 @@ TEST_CASE_FIXTURE(Fixture, "loop_iter_trailing_nil")
     )");
 
     LUAU_REQUIRE_ERROR_COUNT(0, result);
-    CHECK_EQ(*typeChecker.nilType, *requireType("extra"));
+    CHECK_EQ(*builtinTypes->nilType, *requireType("extra"));
 }
 
 TEST_CASE_FIXTURE(Fixture, "loop_iter_no_indexer_strict")
@@ -584,16 +661,271 @@ TEST_CASE_FIXTURE(Fixture, "loop_iter_no_indexer_nonstrict")
     LUAU_REQUIRE_ERROR_COUNT(0, result);
 }
 
-TEST_CASE_FIXTURE(BuiltinsFixture, "loop_iter_iter_metamethod")
+TEST_CASE_FIXTURE(BuiltinsFixture, "loop_iter_metamethod_nil")
 {
+    if (!FFlag::DebugLuauDeferredConstraintResolution)
+        return;
+
     CheckResult result = check(R"(
-        local t = {}
-        setmetatable(t, { __iter = function(o) return next, o.children end })
+        local t = setmetatable({}, { __iter = function(o) return next, nil end, })
+        for k: number, v: string in t do
+        end
+    )");
+
+    LUAU_REQUIRE_ERROR_COUNT(1, result);
+    CHECK(toString(result.errors[0]) == "Type 'nil' could not be converted into '{- [a]: b -}'");
+}
+
+TEST_CASE_FIXTURE(BuiltinsFixture, "loop_iter_metamethod_not_enough_returns")
+{
+    if (!FFlag::DebugLuauDeferredConstraintResolution)
+        return;
+
+    CheckResult result = check(R"(
+        local t = setmetatable({}, { __iter = function(o) end })
+        for k: number, v: string in t do
+        end
+    )");
+
+    LUAU_REQUIRE_ERROR_COUNT(1, result);
+    CHECK(result.errors[0] == TypeError{
+                                  Location{{2, 36}, {2, 37}},
+                                  GenericError{"__iter must return at least one value"},
+                              });
+}
+
+TEST_CASE_FIXTURE(BuiltinsFixture, "loop_iter_metamethod_ok")
+{
+    if (!FFlag::DebugLuauDeferredConstraintResolution)
+        return;
+
+    CheckResult result = check(R"(
+        local t = setmetatable({
+            children = {"foo"}
+        }, { __iter = function(o) return next, o.children end })
         for k: number, v: string in t do
         end
     )");
 
     LUAU_REQUIRE_ERROR_COUNT(0, result);
+}
+
+TEST_CASE_FIXTURE(BuiltinsFixture, "loop_iter_metamethod_ok_with_inference")
+{
+    if (!FFlag::DebugLuauDeferredConstraintResolution)
+        return;
+
+    CheckResult result = check(R"(
+        local t = setmetatable({
+            children = {"foo"}
+        }, { __iter = function(o) return next, o.children end })
+
+        local a, b
+        for k, v in t do
+            a = k
+            b = v
+        end
+    )");
+
+    LUAU_REQUIRE_NO_ERRORS(result);
+    CHECK(toString(requireType("a")) == "number");
+    CHECK(toString(requireType("b")) == "string");
+}
+
+TEST_CASE_FIXTURE(Fixture, "for_loop_lower_bound_is_string")
+{
+    CheckResult result = check(R"(
+        for i: unknown = 1, 10 do end
+    )");
+
+    LUAU_REQUIRE_NO_ERRORS(result);
+}
+
+TEST_CASE_FIXTURE(Fixture, "for_loop_lower_bound_is_string_2")
+{
+    CheckResult result = check(R"(
+        for i: never = 1, 10 do end
+    )");
+
+    LUAU_REQUIRE_ERROR_COUNT(1, result);
+    CHECK_EQ("Type 'number' could not be converted into 'never'", toString(result.errors[0]));
+}
+
+TEST_CASE_FIXTURE(Fixture, "for_loop_lower_bound_is_string_3")
+{
+    CheckResult result = check(R"(
+        for i: number | string = 1, 10 do end
+    )");
+
+    LUAU_REQUIRE_NO_ERRORS(result);
+}
+
+TEST_CASE_FIXTURE(BuiltinsFixture, "cli_68448_iterators_need_not_accept_nil")
+{
+    CheckResult result = check(R"(
+        local function makeEnum(members)
+            local enum = {}
+            for _, memberName in ipairs(members) do
+                enum[memberName] = memberName
+            end
+            return enum
+        end
+    )");
+
+    LUAU_REQUIRE_NO_ERRORS(result);
+    // HACK (CLI-68453): We name this inner table `enum`. For now, use the
+    // exhaustive switch to see past it.
+    CHECK(toString(requireType("makeEnum"), {true}) == "<a>({a}) -> {| [a]: a |}");
+}
+
+TEST_CASE_FIXTURE(Fixture, "iterate_over_free_table")
+{
+    CheckResult result = check(R"(
+        function print(x) end
+
+        function dump(tbl)
+            print(tbl.whatever)
+            for k, v in tbl do
+                print(k)
+                print(v)
+            end
+        end
+    )");
+
+    LUAU_REQUIRE_ERROR_COUNT(1, result);
+
+    GenericError* ge = get<GenericError>(result.errors[0]);
+    REQUIRE(ge);
+
+    CHECK("Cannot iterate over a table without indexer" == ge->message);
+}
+
+TEST_CASE_FIXTURE(BuiltinsFixture, "dcr_iteration_explore_raycast_minimization")
+{
+    CheckResult result = check(R"(
+        local testResults = {}
+        for _, testData in pairs(testResults) do
+        end
+
+        table.insert(testResults, {})
+    )");
+
+    LUAU_REQUIRE_NO_ERRORS(result);
+}
+
+TEST_CASE_FIXTURE(BuiltinsFixture, "dcr_iteration_minimized_fragmented_keys_1")
+{
+    CheckResult result = check(R"(
+        local function rawpairs(t)
+            return next, t, nil
+        end
+
+        local function getFragmentedKeys(tbl)
+            local _ = rawget(tbl, 0)
+            for _ in rawpairs(tbl) do
+            end
+        end
+    )");
+
+    LUAU_REQUIRE_NO_ERRORS(result);
+}
+
+TEST_CASE_FIXTURE(BuiltinsFixture, "dcr_iteration_minimized_fragmented_keys_2")
+{
+    CheckResult result = check(R"(
+        local function getFragmentedKeys(tbl)
+            local _ = rawget(tbl, 0)
+            for _ in next, tbl, nil do
+            end
+        end
+    )");
+
+    LUAU_REQUIRE_NO_ERRORS(result);
+}
+
+TEST_CASE_FIXTURE(BuiltinsFixture, "dcr_iteration_minimized_fragmented_keys_3")
+{
+    CheckResult result = check(R"(
+        local function getFragmentedKeys(tbl)
+            local _ = rawget(tbl, 0)
+            for _ in pairs(tbl) do
+            end
+        end
+    )");
+
+    LUAU_REQUIRE_NO_ERRORS(result);
+}
+
+TEST_CASE_FIXTURE(BuiltinsFixture, "dcr_iteration_fragmented_keys")
+{
+    CheckResult result = check(R"(
+        local function isIndexKey(k, contiguousLength)
+            return true
+        end
+
+        local function getTableLength(tbl)
+            local length = 1
+            local value = rawget(tbl, length)
+            while value ~= nil do
+                length += 1
+                value = rawget(tbl, length)
+            end
+            return length - 1
+        end
+
+        local function rawpairs(t)
+            return next, t, nil
+        end
+
+        local function getFragmentedKeys(tbl)
+            local keys = {}
+            local keysLength = 0
+            local tableLength = getTableLength(tbl)
+            for key, _ in rawpairs(tbl) do
+                if not isIndexKey(key, tableLength) then
+                    keysLength = keysLength + 1
+                    keys[keysLength] = key
+                end
+            end
+            return keys, keysLength, tableLength
+        end
+    )");
+
+    LUAU_REQUIRE_NO_ERRORS(result);
+}
+
+TEST_CASE_FIXTURE(BuiltinsFixture, "dcr_xpath_candidates")
+{
+    CheckResult result = check(R"(
+        type Instance = {}
+        local function findCandidates(instances: { Instance },  path: { string })
+            for _, name in ipairs(path) do
+            end
+            return {}
+        end
+
+        local canditates = findCandidates({}, {})
+        for _, canditate in ipairs(canditates) do end
+    )");
+
+    LUAU_REQUIRE_NO_ERRORS(result);
+}
+
+TEST_CASE_FIXTURE(BuiltinsFixture, "dcr_iteration_on_never_gives_never")
+{
+    if (!FFlag::DebugLuauDeferredConstraintResolution)
+        return;
+
+    CheckResult result = check(R"(
+        local iter: never
+        local ans
+        for xs in iter do
+            ans = xs
+        end
+    )");
+
+    LUAU_REQUIRE_NO_ERRORS(result);
+    CHECK(toString(requireType("ans")) == "never");
 }
 
 TEST_SUITE_END();

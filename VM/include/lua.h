@@ -17,9 +17,9 @@
 /*
 ** pseudo-indices
 */
-#define LUA_REGISTRYINDEX (-10000)
-#define LUA_ENVIRONINDEX (-10001)
-#define LUA_GLOBALSINDEX (-10002)
+#define LUA_REGISTRYINDEX (-LUAI_MAXCSTACK - 2000)
+#define LUA_ENVIRONINDEX (-LUAI_MAXCSTACK - 2001)
+#define LUA_GLOBALSINDEX (-LUAI_MAXCSTACK - 2002)
 #define lua_upvalueindex(i) (LUA_GLOBALSINDEX - (i))
 #define lua_ispseudo(i) ((i) <= LUA_REGISTRYINDEX)
 
@@ -29,7 +29,7 @@ enum lua_Status
     LUA_OK = 0,
     LUA_YIELD,
     LUA_ERRRUN,
-    LUA_ERRSYNTAX,
+    LUA_ERRSYNTAX, // legacy error code, preserved for compatibility
     LUA_ERRMEM,
     LUA_ERRERR,
     LUA_BREAK, // yielded for a debug breakpoint
@@ -38,10 +38,10 @@ enum lua_Status
 enum lua_CoStatus
 {
     LUA_CORUN = 0, // running
-    LUA_COSUS, // suspended
-    LUA_CONOR, // 'normal' (it resumed another coroutine)
-    LUA_COFIN, // finished
-    LUA_COERR, // finished with error
+    LUA_COSUS,     // suspended
+    LUA_CONOR,     // 'normal' (it resumed another coroutine)
+    LUA_COFIN,     // finished
+    LUA_COERR,     // finished with error
 };
 
 typedef struct lua_State lua_State;
@@ -313,7 +313,11 @@ LUA_API uintptr_t lua_encodepointer(lua_State* L, uintptr_t p);
 LUA_API double lua_clock();
 
 LUA_API void lua_setuserdatatag(lua_State* L, int idx, int tag);
-LUA_API void lua_setuserdatadtor(lua_State* L, int tag, void (*dtor)(lua_State*, void*));
+
+typedef void (*lua_Destructor)(lua_State* L, void* userdata);
+
+LUA_API void lua_setuserdatadtor(lua_State* L, int tag, lua_Destructor dtor);
+LUA_API lua_Destructor lua_getuserdatadtor(lua_State* L, int tag);
 
 LUA_API void lua_clonefunction(lua_State* L, int idx);
 
@@ -398,16 +402,18 @@ LUA_API const char* lua_debugtrace(lua_State* L);
 
 struct lua_Debug
 {
-    const char* name;           // (n)
-    const char* what;           // (s) `Lua', `C', `main', `tail'
-    const char* source;         // (s)
-    int linedefined;            // (s)
-    int currentline;            // (l)
-    unsigned char nupvals;      // (u) number of upvalues
-    unsigned char nparams;      // (a) number of parameters
-    char isvararg;              // (a)
-    char short_src[LUA_IDSIZE]; // (s)
-    void* userdata;             // only valid in luau_callhook
+    const char* name;      // (n)
+    const char* what;      // (s) `Lua', `C', `main', `tail'
+    const char* source;    // (s)
+    const char* short_src; // (s)
+    int linedefined;       // (s)
+    int currentline;       // (l)
+    unsigned char nupvals; // (u) number of upvalues
+    unsigned char nparams; // (a) number of parameters
+    char isvararg;         // (a)
+    void* userdata;        // only valid in luau_callhook
+
+    char ssbuf[LUA_IDSIZE];
 };
 
 // }======================================================================

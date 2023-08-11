@@ -20,7 +20,11 @@ const size_t kPageSize = 4096;
 #include <sys/mman.h>
 #include <unistd.h>
 
+#if defined(__FreeBSD__) && !(_POSIX_C_SOURCE >= 200112L)
+const size_t kPageSize = getpagesize();
+#else
 const size_t kPageSize = sysconf(_SC_PAGESIZE);
+#endif
 #endif
 
 static size_t alignToPageSize(size_t size)
@@ -29,13 +33,17 @@ static size_t alignToPageSize(size_t size)
 }
 
 #if defined(_WIN32)
-static uint8_t* allocatePages(size_t size)
+static uint8_t* allocatePagesImpl(size_t size)
 {
-    return (uint8_t*)VirtualAlloc(nullptr, alignToPageSize(size), MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    LUAU_ASSERT(size == alignToPageSize(size));
+
+    return (uint8_t*)VirtualAlloc(nullptr, size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
 }
 
-static void freePages(uint8_t* mem, size_t size)
+static void freePagesImpl(uint8_t* mem, size_t size)
 {
+    LUAU_ASSERT(size == alignToPageSize(size));
+
     if (VirtualFree(mem, 0, MEM_RELEASE) == 0)
         LUAU_ASSERT(!"failed to deallocate block memory");
 }
@@ -47,24 +55,34 @@ static void makePagesExecutable(uint8_t* mem, size_t size)
 
     DWORD oldProtect;
     if (VirtualProtect(mem, size, PAGE_EXECUTE_READ, &oldProtect) == 0)
-        LUAU_ASSERT(!"failed to change page protection");
+        LUAU_ASSERT(!"Failed to change page protection");
 }
 
 static void flushInstructionCache(uint8_t* mem, size_t size)
 {
+#if WINAPI_FAMILY_PARTITION(WINAPI_PARTITION_APP | WINAPI_PARTITION_SYSTEM)
     if (FlushInstructionCache(GetCurrentProcess(), mem, size) == 0)
-        LUAU_ASSERT(!"failed to flush instruction cache");
+        LUAU_ASSERT(!"Failed to flush instruction cache");
+#endif
 }
 #else
-static uint8_t* allocatePages(size_t size)
+static uint8_t* allocatePagesImpl(size_t size)
 {
-    return (uint8_t*)mmap(nullptr, alignToPageSize(size), PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    LUAU_ASSERT(size == alignToPageSize(size));
+
+#ifdef __APPLE__
+    return (uint8_t*)mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON | MAP_JIT, -1, 0);
+#else
+    return (uint8_t*)mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+#endif
 }
 
-static void freePages(uint8_t* mem, size_t size)
+static void freePagesImpl(uint8_t* mem, size_t size)
 {
-    if (munmap(mem, alignToPageSize(size)) != 0)
-        LUAU_ASSERT(!"failed to deallocate block memory");
+    LUAU_ASSERT(size == alignToPageSize(size));
+
+    if (munmap(mem, size) != 0)
+        LUAU_ASSERT(!"Failed to deallocate block memory");
 }
 
 static void makePagesExecutable(uint8_t* mem, size_t size)
@@ -73,7 +91,7 @@ static void makePagesExecutable(uint8_t* mem, size_t size)
     LUAU_ASSERT(size == alignToPageSize(size));
 
     if (mprotect(mem, size, PROT_READ | PROT_EXEC) != 0)
-        LUAU_ASSERT(!"failed to change page protection");
+        LUAU_ASSERT(!"Failed to change page protection");
 }
 
 static void flushInstructionCache(uint8_t* mem, size_t size)
@@ -88,10 +106,17 @@ namespace CodeGen
 {
 
 CodeAllocator::CodeAllocator(size_t blockSize, size_t maxTotalSize)
-    : blockSize(blockSize)
-    , maxTotalSize(maxTotalSize)
+    : CodeAllocator(blockSize, maxTotalSize, nullptr, nullptr)
 {
-    LUAU_ASSERT(blockSize > kMaxUnwindDataSize);
+}
+
+CodeAllocator::CodeAllocator(size_t blockSize, size_t maxTotalSize, AllocationCallback* allocationCallback, void* allocationCallbackContext)
+    : blockSize{blockSize}
+    , maxTotalSize{maxTotalSize}
+    , allocationCallback{allocationCallback}
+    , allocationCallbackContext{allocationCallbackContext}
+{
+    LUAU_ASSERT(blockSize > kMaxReservedDataSize);
     LUAU_ASSERT(maxTotalSize >= blockSize);
 }
 
@@ -108,23 +133,23 @@ CodeAllocator::~CodeAllocator()
 }
 
 bool CodeAllocator::allocate(
-    uint8_t* data, size_t dataSize, uint8_t* code, size_t codeSize, uint8_t*& result, size_t& resultSize, uint8_t*& resultCodeStart)
+    const uint8_t* data, size_t dataSize, const uint8_t* code, size_t codeSize, uint8_t*& result, size_t& resultSize, uint8_t*& resultCodeStart)
 {
-    // 'Round up' to preserve 16 byte alignment
-    size_t alignedDataSize = (dataSize + 15) & ~15;
+    // 'Round up' to preserve code alignment
+    size_t alignedDataSize = (dataSize + (kCodeAlignment - 1)) & ~(kCodeAlignment - 1);
 
     size_t totalSize = alignedDataSize + codeSize;
 
     // Function has to fit into a single block with unwinding information
-    if (totalSize > blockSize - kMaxUnwindDataSize)
+    if (totalSize > blockSize - kMaxReservedDataSize)
         return false;
 
-    size_t unwindInfoSize = 0;
+    size_t startOffset = 0;
 
     // We might need a new block
     if (totalSize > size_t(blockEnd - blockPos))
     {
-        if (!allocateNewBlock(unwindInfoSize))
+        if (!allocateNewBlock(startOffset))
             return false;
 
         LUAU_ASSERT(totalSize <= size_t(blockEnd - blockPos));
@@ -132,20 +157,20 @@ bool CodeAllocator::allocate(
 
     LUAU_ASSERT((uintptr_t(blockPos) & (kPageSize - 1)) == 0); // Allocation starts on page boundary
 
-    size_t dataOffset = unwindInfoSize + alignedDataSize - dataSize;
-    size_t codeOffset = unwindInfoSize + alignedDataSize;
+    size_t dataOffset = startOffset + alignedDataSize - dataSize;
+    size_t codeOffset = startOffset + alignedDataSize;
 
     if (dataSize)
         memcpy(blockPos + dataOffset, data, dataSize);
     if (codeSize)
         memcpy(blockPos + codeOffset, code, codeSize);
 
-    size_t pageAlignedSize = alignToPageSize(unwindInfoSize + totalSize);
+    size_t pageAlignedSize = alignToPageSize(startOffset + totalSize);
 
     makePagesExecutable(blockPos, pageAlignedSize);
     flushInstructionCache(blockPos + codeOffset, codeSize);
 
-    result = blockPos + unwindInfoSize;
+    result = blockPos + startOffset;
     resultSize = totalSize;
     resultCodeStart = blockPos + codeOffset;
 
@@ -187,10 +212,10 @@ bool CodeAllocator::allocateNewBlock(size_t& unwindInfoSize)
     {
         void* unwindInfo = createBlockUnwindInfo(context, block, blockSize, unwindInfoSize);
 
-        // 'Round up' to preserve 16 byte alignment of the following data and code
-        unwindInfoSize = (unwindInfoSize + 15) & ~15;
+        // 'Round up' to preserve alignment of the following data and code
+        unwindInfoSize = (unwindInfoSize + (kCodeAlignment - 1)) & ~(kCodeAlignment - 1);
 
-        LUAU_ASSERT(unwindInfoSize <= kMaxUnwindDataSize);
+        LUAU_ASSERT(unwindInfoSize <= kMaxReservedDataSize);
 
         if (!unwindInfo)
             return false;
@@ -199,6 +224,30 @@ bool CodeAllocator::allocateNewBlock(size_t& unwindInfoSize)
     }
 
     return true;
+}
+
+uint8_t* CodeAllocator::allocatePages(size_t size) const
+{
+    const size_t pageAlignedSize = alignToPageSize(size);
+
+    uint8_t* const mem = allocatePagesImpl(pageAlignedSize);
+    if (mem == nullptr)
+        return nullptr;
+
+    if (allocationCallback)
+        allocationCallback(allocationCallbackContext, nullptr, 0, mem, pageAlignedSize);
+
+    return mem;
+}
+
+void CodeAllocator::freePages(uint8_t* mem, size_t size) const
+{
+    const size_t pageAlignedSize = alignToPageSize(size);
+
+    if (allocationCallback)
+        allocationCallback(allocationCallbackContext, mem, pageAlignedSize, nullptr, 0);
+
+    freePagesImpl(mem, pageAlignedSize);
 }
 
 } // namespace CodeGen

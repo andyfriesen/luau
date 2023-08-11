@@ -30,6 +30,12 @@ bool verbose = false;
 // Default optimization level for conformance test; can be overridden via -On
 int optimizationLevel = 1;
 
+// Run conformance tests with native code generation
+bool codegen = false;
+
+// Something to seed a pseudorandom number generator with
+std::optional<unsigned> randomSeed;
+
 static bool skipFastFlag(const char* flagName)
 {
     if (strncmp(flagName, "Test", 4) == 0)
@@ -53,6 +59,25 @@ static bool debuggerPresent()
     int ret = sysctl(mib, sizeof(mib) / sizeof(*mib), &info, &size, nullptr, 0);
     // debugger is attached if the P_TRACED flag is set
     return ret == 0 && (info.kp_proc.p_flag & P_TRACED) != 0;
+#elif defined(__linux__)
+    FILE* st = fopen("/proc/self/status", "r");
+    if (!st)
+        return false; // assume no debugger is attached.
+
+    int tpid = 0;
+    char buf[256];
+
+    while (fgets(buf, sizeof(buf), st))
+    {
+        if (strncmp(buf, "TracerPid:\t", 11) == 0)
+        {
+            tpid = atoi(buf + 11);
+            break;
+        }
+    }
+
+    fclose(st);
+    return tpid != 0;
 #else
     return false; // assume no debugger is attached.
 #endif
@@ -61,7 +86,7 @@ static bool debuggerPresent()
 static int testAssertionHandler(const char* expr, const char* file, int line, const char* function)
 {
     if (debuggerPresent())
-        LUAU_DEBUGBREAK();
+        return 1; // LUAU_ASSERT will trigger LUAU_DEBUGBREAK for a more convenient debugging experience
 
     ADD_FAIL_AT(file, line, "Assertion failed: ", std::string(expr));
     return 1;
@@ -136,8 +161,10 @@ struct BoostLikeReporter : doctest::IReporter
     }
 
     void log_message(const doctest::MessageData& md) override
-    { //
-        printf("%s(%d): ERROR: %s\n", md.m_file, md.m_line, md.m_string.c_str());
+    {
+        const char* severity = (md.m_severity & doctest::assertType::is_warn) ? "WARNING" : "ERROR";
+
+        printf("%s(%d): %s: %s\n", md.m_file, md.m_line, severity, md.m_string.c_str());
     }
 
     // called when a test case is skipped either because it doesn't pass the filters, has a skip decorator
@@ -176,7 +203,7 @@ static FValueResult<bool> parseFFlag(std::string_view view)
     auto [name, value] = parseFValueHelper(view);
     bool state = value ? *value == "true" : true;
     if (value && value != "true" && value != "false")
-        std::cerr << "Ignored '" << name << "' because '" << *value << "' is not a valid FFlag state." << std::endl;
+        fprintf(stderr, "Ignored '%s' because '%s' is not a valid flag state\n", name.c_str(), value->c_str());
 
     return {name, state};
 }
@@ -239,9 +266,7 @@ int main(int argc, char** argv)
             if (skipFastFlag(flag->name))
                 continue;
 
-            if (flag->dynamic)
-                std::cout << 'D';
-            std::cout << "FFlag" << flag->name << std::endl;
+            printf("%sFFlag%s\n", flag->dynamic ? "D" : "", flag->name);
         }
 
         return 0;
@@ -252,13 +277,28 @@ int main(int argc, char** argv)
         verbose = true;
     }
 
+    if (doctest::parseFlag(argc, argv, "--codegen"))
+    {
+        codegen = true;
+    }
+
     int level = -1;
     if (doctest::parseIntOption(argc, argv, "-O", doctest::option_int, level))
     {
         if (level < 0 || level > 2)
-            std::cerr << "Optimization level must be between 0 and 2 inclusive." << std::endl;
+            fprintf(stderr, "Optimization level must be between 0 and 2 inclusive\n");
         else
             optimizationLevel = level;
+    }
+
+    int rseed = -1;
+    if (doctest::parseIntOption(argc, argv, "--random-seed=", doctest::option_int, rseed))
+        randomSeed = unsigned(rseed);
+
+    if (doctest::parseOption(argc, argv, "--randomize") && !randomSeed)
+    {
+        randomSeed = unsigned(time(nullptr));
+        printf("Using RNG seed %u\n", *randomSeed);
     }
 
     if (std::vector<doctest::String> flags; doctest::parseCommaSepArgs(argc, argv, "--fflags=", flags))
@@ -295,6 +335,8 @@ int main(int argc, char** argv)
         printf(" --verbose                             Enables verbose output (e.g. lua 'print' statements)\n");
         printf(" --fflags=                             Sets specified fast flags\n");
         printf(" --list-fflags                         List all fast flags\n");
+        printf(" --randomize                           Use a random RNG seed\n");
+        printf(" --random-seed=n                       Use a particular RNG seed\n");
     }
     return result;
 }

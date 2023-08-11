@@ -7,7 +7,23 @@
 
 using namespace Luau;
 
+LUAU_FASTFLAG(DebugLuauDeferredConstraintResolution);
+
 TEST_SUITE_BEGIN("TypeSingletons");
+
+TEST_CASE_FIXTURE(Fixture, "function_args_infer_singletons")
+{
+    CheckResult result = check(R"(
+--!strict
+type Phase = "A" | "B" | "C"
+local function f(e : Phase) : number
+    return 0
+end
+local e = f("B")
+)");
+
+    LUAU_REQUIRE_NO_ERRORS(result);
+}
 
 TEST_CASE_FIXTURE(Fixture, "bool_singletons")
 {
@@ -79,6 +95,16 @@ TEST_CASE_FIXTURE(Fixture, "string_singleton_subtype")
     LUAU_REQUIRE_NO_ERRORS(result);
 }
 
+TEST_CASE_FIXTURE(Fixture, "string_singleton_subtype_multi_assignment")
+{
+    CheckResult result = check(R"(
+        local a: "foo" = "foo"
+        local b: string, c: number = a, 10
+    )");
+
+    LUAU_REQUIRE_NO_ERRORS(result);
+}
+
 TEST_CASE_FIXTURE(Fixture, "function_call_with_singletons")
 {
     CheckResult result = check(R"(
@@ -121,8 +147,16 @@ TEST_CASE_FIXTURE(Fixture, "overloaded_function_call_with_singletons_mismatch")
     )");
 
     LUAU_REQUIRE_ERROR_COUNT(2, result);
-    CHECK_EQ("Type 'number' could not be converted into 'string'", toString(result.errors[0]));
-    CHECK_EQ("Other overloads are also not viable: (false, number) -> ()", toString(result.errors[1]));
+    if (FFlag::DebugLuauDeferredConstraintResolution)
+    {
+        CHECK_EQ("None of the overloads for function that accept 2 arguments are compatible.", toString(result.errors[0]));
+        CHECK_EQ("Available overloads: (true, string) -> (); and (false, number) -> ()", toString(result.errors[1]));
+    }
+    else
+    {
+        CHECK_EQ("Type 'number' could not be converted into 'string'", toString(result.errors[0]));
+        CHECK_EQ("Other overloads are also not viable: (false, number) -> ()", toString(result.errors[1]));
+    }
 }
 
 TEST_CASE_FIXTURE(Fixture, "enums_using_singletons")
@@ -282,6 +316,9 @@ TEST_CASE_FIXTURE(Fixture, "table_properties_type_error_escapes")
 
 TEST_CASE_FIXTURE(Fixture, "error_detailed_tagged_union_mismatch_string")
 {
+    ScopedFastFlag sff{"LuauIndentTypeMismatch", true};
+    ScopedFastInt sfi{"LuauIndentTypeMismatchMaxTypeLength", 10};
+
     CheckResult result = check(R"(
 type Cat = { tag: 'cat', catfood: string }
 type Dog = { tag: 'dog', dogfood: string }
@@ -291,14 +328,18 @@ local a: Animal = { tag = 'cat', cafood = 'something' }
     )");
 
     LUAU_REQUIRE_ERROR_COUNT(1, result);
-    CHECK_EQ(R"(Type 'a' could not be converted into 'Cat | Dog'
+    const std::string expected = R"(Type 'a' could not be converted into 'Cat | Dog'
 caused by:
-  None of the union options are compatible. For example: Table type 'a' not compatible with type 'Cat' because the former is missing field 'catfood')",
-        toString(result.errors[0]));
+  None of the union options are compatible. For example: 
+Table type 'a' not compatible with type 'Cat' because the former is missing field 'catfood')";
+    CHECK_EQ(expected, toString(result.errors[0]));
 }
 
 TEST_CASE_FIXTURE(Fixture, "error_detailed_tagged_union_mismatch_bool")
 {
+    ScopedFastFlag sff{"LuauIndentTypeMismatch", true};
+    ScopedFastInt sfi{"LuauIndentTypeMismatchMaxTypeLength", 10};
+
     CheckResult result = check(R"(
 type Good = { success: true, result: string }
 type Bad = { success: false, error: string }
@@ -308,18 +349,20 @@ local a: Result = { success = false, result = 'something' }
     )");
 
     LUAU_REQUIRE_ERROR_COUNT(1, result);
-    CHECK_EQ(R"(Type 'a' could not be converted into 'Bad | Good'
+    const std::string expected = R"(Type 'a' could not be converted into 'Bad | Good'
 caused by:
-  None of the union options are compatible. For example: Table type 'a' not compatible with type 'Bad' because the former is missing field 'error')",
-        toString(result.errors[0]));
+  None of the union options are compatible. For example: 
+Table type 'a' not compatible with type 'Bad' because the former is missing field 'error')";
+    CHECK_EQ(expected, toString(result.errors[0]));
 }
 
 TEST_CASE_FIXTURE(Fixture, "parametric_tagged_union_alias")
 {
     ScopedFastFlag sff[] = {
         {"DebugLuauDeferredConstraintResolution", true},
+        {"LuauIndentTypeMismatch", true},
     };
-
+    ScopedFastInt sfi{"LuauIndentTypeMismatchMaxTypeLength", 10};
     CheckResult result = check(R"(
         type Ok<T> = {success: true, result: T}
         type Err<T> = {success: false, error: T}
@@ -331,10 +374,10 @@ TEST_CASE_FIXTURE(Fixture, "parametric_tagged_union_alias")
 
     LUAU_REQUIRE_ERROR_COUNT(1, result);
 
-    const std::string expectedError = "Type '{ result: string, success: false }' could not be converted into 'Err<number> | Ok<string>'\n"
-                                      "caused by:\n"
-                                      "  None of the union options are compatible. For example: Table type '{ result: string, success: false }'"
-                                      " not compatible with type 'Err<number>' because the former is missing field 'error'";
+    const std::string expectedError = R"(Type 'a' could not be converted into 'Err<number> | Ok<string>'
+caused by:
+  None of the union options are compatible. For example: 
+Table type 'a' not compatible with type 'Err<number>' because the former is missing field 'error')";
 
     CHECK(toString(result.errors[0]) == expectedError);
 }
@@ -421,28 +464,6 @@ TEST_CASE_FIXTURE(Fixture, "widening_happens_almost_everywhere_except_for_tables
     LUAU_REQUIRE_NO_ERRORS(result);
 }
 
-TEST_CASE_FIXTURE(BuiltinsFixture, "table_insert_with_a_singleton_argument")
-{
-    ScopedFastFlag sff{"LuauLowerBoundsCalculation", true};
-
-    CheckResult result = check(R"(
-        local function foo(t, x)
-            if x == "hi" or x == "bye" then
-                table.insert(t, x)
-            end
-
-            return t
-        end
-
-        local t = foo({}, "hi")
-        table.insert(t, "totally_unrelated_type" :: "totally_unrelated_type")
-    )");
-
-    LUAU_REQUIRE_NO_ERRORS(result);
-
-    CHECK_EQ("{string}", toString(requireType("t")));
-}
-
 TEST_CASE_FIXTURE(Fixture, "functions_are_not_to_be_widened")
 {
     CheckResult result = check(R"(
@@ -512,8 +533,6 @@ TEST_CASE_FIXTURE(Fixture, "taking_the_length_of_union_of_string_singleton")
 
 TEST_CASE_FIXTURE(Fixture, "no_widening_from_callsites")
 {
-    ScopedFastFlag sff{"LuauReturnsFromCallsitesAreNotWidened", true};
-
     CheckResult result = check(R"(
         type Direction = "North" | "East" | "West" | "South"
 

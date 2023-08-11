@@ -81,8 +81,8 @@ struct FrontendFixture : BuiltinsFixture
 {
     FrontendFixture()
     {
-        addGlobalBinding(frontend, "game", frontend.typeChecker.anyType, "@test");
-        addGlobalBinding(frontend, "script", frontend.typeChecker.anyType, "@test");
+        addGlobalBinding(frontend.globals, "game", builtinTypes->anyType, "@test");
+        addGlobalBinding(frontend.globals, "script", builtinTypes->anyType, "@test");
     }
 };
 
@@ -152,12 +152,12 @@ TEST_CASE_FIXTURE(FrontendFixture, "automatically_check_dependent_scripts")
 
     frontend.check("game/Gui/Modules/B");
 
-    ModulePtr bModule = frontend.moduleResolver.modules["game/Gui/Modules/B"];
+    ModulePtr bModule = frontend.moduleResolver.getModule("game/Gui/Modules/B");
     REQUIRE(bModule != nullptr);
     CHECK(bModule->errors.empty());
     Luau::dumpErrors(bModule);
 
-    auto bExports = first(bModule->getModuleScope()->returnType);
+    auto bExports = first(bModule->returnType);
     REQUIRE(!!bExports);
 
     CHECK_EQ("{| b_value: number |}", toString(*bExports));
@@ -240,16 +240,16 @@ TEST_CASE_FIXTURE(FrontendFixture, "nocheck_modules_are_typed")
     CheckResult result = frontend.check("game/Gui/Modules/C");
     LUAU_REQUIRE_NO_ERRORS(result);
 
-    ModulePtr aModule = frontend.moduleResolver.modules["game/Gui/Modules/A"];
+    ModulePtr aModule = frontend.moduleResolver.getModule("game/Gui/Modules/A");
     REQUIRE(bool(aModule));
 
-    std::optional<TypeId> aExports = first(aModule->getModuleScope()->returnType);
+    std::optional<TypeId> aExports = first(aModule->returnType);
     REQUIRE(bool(aExports));
 
-    ModulePtr bModule = frontend.moduleResolver.modules["game/Gui/Modules/B"];
+    ModulePtr bModule = frontend.moduleResolver.getModule("game/Gui/Modules/B");
     REQUIRE(bool(bModule));
 
-    std::optional<TypeId> bExports = first(bModule->getModuleScope()->returnType);
+    std::optional<TypeId> bExports = first(bModule->returnType);
     REQUIRE(bool(bExports));
 
     CHECK_EQ(toString(*aExports), toString(*bExports));
@@ -297,10 +297,10 @@ TEST_CASE_FIXTURE(FrontendFixture, "nocheck_cycle_used_by_checked")
     CheckResult result = frontend.check("game/Gui/Modules/C");
     LUAU_REQUIRE_NO_ERRORS(result);
 
-    ModulePtr cModule = frontend.moduleResolver.modules["game/Gui/Modules/C"];
+    ModulePtr cModule = frontend.moduleResolver.getModule("game/Gui/Modules/C");
     REQUIRE(bool(cModule));
 
-    std::optional<TypeId> cExports = first(cModule->getModuleScope()->returnType);
+    std::optional<TypeId> cExports = first(cModule->returnType);
     REQUIRE(bool(cExports));
     CHECK_EQ("{| a: any, b: any |}", toString(*cExports));
 }
@@ -444,6 +444,53 @@ TEST_CASE_FIXTURE(FrontendFixture, "cycle_incremental_type_surface_longer")
     CHECK_EQ(toString(tyB), "any");
 }
 
+TEST_CASE_FIXTURE(FrontendFixture, "cycle_incremental_type_surface_exports")
+{
+    ScopedFastFlag luauFixCyclicModuleExports{"LuauFixCyclicModuleExports", true};
+
+    fileResolver.source["game/A"] = R"(
+local b = require(game.B)
+export type atype = { x: b.btype }
+return {mod_a = 1}
+    )";
+
+    fileResolver.source["game/B"] = R"(
+export type btype = { x: number }
+
+local function bf()
+    local a = require(game.A)
+    local bfl : a.atype = nil
+    return {bfl.x}
+end
+return {mod_b = 2}
+    )";
+
+    ToStringOptions opts;
+    opts.exhaustive = true;
+
+    CheckResult resultA = frontend.check("game/A");
+    LUAU_REQUIRE_ERRORS(resultA);
+
+    CheckResult resultB = frontend.check("game/B");
+    LUAU_REQUIRE_ERRORS(resultB);
+
+    TypeId tyB = requireExportedType("game/B", "btype");
+    CHECK_EQ(toString(tyB, opts), "{| x: number |}");
+
+    TypeId tyA = requireExportedType("game/A", "atype");
+    CHECK_EQ(toString(tyA, opts), "{| x: any |}");
+
+    frontend.markDirty("game/B");
+    resultB = frontend.check("game/B");
+    LUAU_REQUIRE_ERRORS(resultB);
+
+    tyB = requireExportedType("game/B", "btype");
+    CHECK_EQ(toString(tyB, opts), "{| x: number |}");
+
+    tyA = requireExportedType("game/A", "atype");
+    CHECK_EQ(toString(tyA, opts), "{| x: any |}");
+}
+
 TEST_CASE_FIXTURE(FrontendFixture, "dont_reparse_clean_file_when_linting")
 {
     fileResolver.source["Modules/A"] = R"(
@@ -456,16 +503,16 @@ TEST_CASE_FIXTURE(FrontendFixture, "dont_reparse_clean_file_when_linting")
         end
     )";
 
-    frontend.check("Modules/A");
+    configResolver.defaultConfig.enabledLint.enableWarning(LintWarning::Code_ForRange);
+
+    lintModule("Modules/A");
 
     fileResolver.source["Modules/A"] = R"(
         -- We have fixed the lint error, but we did not tell the Frontend that the file is changed!
-        -- Therefore, we expect Frontend to reuse the parse tree.
+        -- Therefore, we expect Frontend to reuse the results from previous lint.
     )";
 
-    configResolver.defaultConfig.enabledLint.enableWarning(LintWarning::Code_ForRange);
-
-    LintResult lintResult = frontend.lint("Modules/A");
+    LintResult lintResult = lintModule("Modules/A");
 
     CHECK_EQ(1, lintResult.warnings.size());
 }
@@ -486,7 +533,7 @@ TEST_CASE_FIXTURE(FrontendFixture, "dont_recheck_script_that_hasnt_been_marked_d
 
     frontend.check("game/Gui/Modules/B");
 
-    ModulePtr bModule = frontend.moduleResolver.modules["game/Gui/Modules/B"];
+    ModulePtr bModule = frontend.moduleResolver.getModule("game/Gui/Modules/B");
     CHECK(bModule->errors.empty());
     Luau::dumpErrors(bModule);
 }
@@ -507,14 +554,37 @@ TEST_CASE_FIXTURE(FrontendFixture, "recheck_if_dependent_script_is_dirty")
 
     frontend.check("game/Gui/Modules/B");
 
-    ModulePtr bModule = frontend.moduleResolver.modules["game/Gui/Modules/B"];
+    ModulePtr bModule = frontend.moduleResolver.getModule("game/Gui/Modules/B");
     CHECK(bModule->errors.empty());
     Luau::dumpErrors(bModule);
 
-    auto bExports = first(bModule->getModuleScope()->returnType);
+    auto bExports = first(bModule->returnType);
     REQUIRE(!!bExports);
 
     CHECK_EQ("{| b_value: string |}", toString(*bExports));
+}
+
+TEST_CASE_FIXTURE(FrontendFixture, "mark_non_immediate_reverse_deps_as_dirty")
+{
+    fileResolver.source["game/Gui/Modules/A"] = "return {hello=5, world=true}";
+    fileResolver.source["game/Gui/Modules/B"] = R"(
+        return require(game:GetService('Gui').Modules.A)
+    )";
+    fileResolver.source["game/Gui/Modules/C"] = R"(
+        local Modules = game:GetService('Gui').Modules
+        local B = require(Modules.B)
+        return {c_value = B.hello}
+    )";
+
+    frontend.check("game/Gui/Modules/C");
+
+    std::vector<Luau::ModuleName> markedDirty;
+    frontend.markDirty("game/Gui/Modules/A", &markedDirty);
+
+    REQUIRE(markedDirty.size() == 3);
+    CHECK(std::find(markedDirty.begin(), markedDirty.end(), "game/Gui/Modules/A") != markedDirty.end());
+    CHECK(std::find(markedDirty.begin(), markedDirty.end(), "game/Gui/Modules/B") != markedDirty.end());
+    CHECK(std::find(markedDirty.begin(), markedDirty.end(), "game/Gui/Modules/C") != markedDirty.end());
 }
 
 #if 0
@@ -737,23 +807,47 @@ TEST_CASE_FIXTURE(FrontendFixture, "test_lint_uses_correct_config")
 
     configResolver.configFiles["Module/A"].enabledLint.enableWarning(LintWarning::Code_ForRange);
 
-    auto result = frontend.lint("Module/A");
+    auto result = lintModule("Module/A");
     CHECK_EQ(1, result.warnings.size());
 
     configResolver.configFiles["Module/A"].enabledLint.disableWarning(LintWarning::Code_ForRange);
+    frontend.markDirty("Module/A");
 
-    auto result2 = frontend.lint("Module/A");
+    auto result2 = lintModule("Module/A");
     CHECK_EQ(0, result2.warnings.size());
 
     LintOptions overrideOptions;
 
     overrideOptions.enableWarning(LintWarning::Code_ForRange);
-    auto result3 = frontend.lint("Module/A", overrideOptions);
+    frontend.markDirty("Module/A");
+
+    auto result3 = lintModule("Module/A", overrideOptions);
     CHECK_EQ(1, result3.warnings.size());
 
     overrideOptions.disableWarning(LintWarning::Code_ForRange);
-    auto result4 = frontend.lint("Module/A", overrideOptions);
+    frontend.markDirty("Module/A");
+
+    auto result4 = lintModule("Module/A", overrideOptions);
     CHECK_EQ(0, result4.warnings.size());
+}
+
+TEST_CASE_FIXTURE(FrontendFixture, "lint_results_are_only_for_checked_module")
+{
+    fileResolver.source["Module/A"] = R"(
+local _ = 0b10000000000000000000000000000000000000000000000000000000000000000
+    )";
+
+    fileResolver.source["Module/B"] = R"(
+require(script.Parent.A)
+local _ = 0x10000000000000000
+    )";
+
+    LintResult lintResult = lintModule("Module/B");
+    CHECK_EQ(1, lintResult.warnings.size());
+
+    // Check cached result
+    lintResult = lintModule("Module/B");
+    CHECK_EQ(1, lintResult.warnings.size());
 }
 
 TEST_CASE_FIXTURE(FrontendFixture, "discard_type_graphs")
@@ -768,7 +862,7 @@ TEST_CASE_FIXTURE(FrontendFixture, "discard_type_graphs")
 
     ModulePtr module = fe.moduleResolver.getModule("Module/A");
 
-    CHECK_EQ(0, module->internalTypes.typeVars.size());
+    CHECK_EQ(0, module->internalTypes.types.size());
     CHECK_EQ(0, module->internalTypes.typePacks.size());
     CHECK_EQ(0, module->astTypes.size());
     CHECK_EQ(0, module->astResolvedTypes.size());
@@ -829,12 +923,12 @@ TEST_CASE_FIXTURE(FrontendFixture, "environments")
 {
     ScopePtr testScope = frontend.addEnvironment("test");
 
-    unfreeze(typeChecker.globalTypes);
-    loadDefinitionFile(typeChecker, testScope, R"(
+    unfreeze(frontend.globals.globalTypes);
+    frontend.loadDefinitionFile(frontend.globals, testScope, R"(
         export type Foo = number | string
     )",
-        "@test");
-    freeze(typeChecker.globalTypes);
+        "@test", /* captureComments */ false);
+    freeze(frontend.globals.globalTypes);
 
     fileResolver.source["A"] = R"(
         --!nonstrict
@@ -1027,11 +1121,6 @@ TEST_CASE("check_without_builtin_next")
 
 TEST_CASE_FIXTURE(BuiltinsFixture, "reexport_cyclic_type")
 {
-    ScopedFastFlag sff[] = {
-        {"LuauForceExportSurfacesToBeNormal", true},
-        {"LuauLowerBoundsCalculation", true},
-    };
-
     fileResolver.source["Module/A"] = R"(
         type F<T> = (set: G<T>) -> ()
 
@@ -1063,19 +1152,14 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "reexport_cyclic_type")
 
 TEST_CASE_FIXTURE(BuiltinsFixture, "reexport_type_alias")
 {
-    ScopedFastFlag sff[] = {
-        {"LuauForceExportSurfacesToBeNormal", true},
-        {"LuauLowerBoundsCalculation", true},
-    };
-
     fileResolver.source["Module/A"] = R"(
         type KeyOfTestEvents = "test-file-start" | "test-file-success" | "test-file-failure" | "test-case-result"
-        type unknown = any
+        type MyAny = any
 
         export type TestFileEvent<T = KeyOfTestEvents> = (
             eventName: T,
             args: any --[[ ROBLOX TODO: Unhandled node for type: TSIndexedAccessType ]] --[[ TestEvents[T] ]]
-        ) -> unknown
+        ) -> MyAny
 
         return {}
     )";
@@ -1090,6 +1174,54 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "reexport_type_alias")
     CheckResult result = frontend.check("Module/B");
 
     LUAU_REQUIRE_NO_ERRORS(result);
+}
+
+TEST_CASE_FIXTURE(BuiltinsFixture, "module_scope_check")
+{
+    frontend.prepareModuleScope = [this](const ModuleName& name, const ScopePtr& scope, bool forAutocomplete) {
+        scope->bindings[Luau::AstName{"x"}] = Luau::Binding{frontend.globals.builtinTypes->numberType};
+    };
+
+    fileResolver.source["game/A"] = R"(
+        local a = x
+    )";
+
+    CheckResult result = frontend.check("game/A");
+    LUAU_REQUIRE_NO_ERRORS(result);
+
+    auto ty = requireType("game/A", "a");
+    CHECK_EQ(toString(ty), "number");
+}
+
+TEST_CASE_FIXTURE(FrontendFixture, "parse_only")
+{
+    fileResolver.source["game/Gui/Modules/A"] = R"(
+        local a: number = 'oh no a type error'
+        return {a=a}
+    )";
+
+    fileResolver.source["game/Gui/Modules/B"] = R"(
+        local Modules = script.Parent
+        local A = require(Modules.A)
+        local b: number = 2
+    )";
+
+    frontend.parse("game/Gui/Modules/B");
+
+    REQUIRE(frontend.sourceNodes.count("game/Gui/Modules/A"));
+    REQUIRE(frontend.sourceNodes.count("game/Gui/Modules/B"));
+
+    auto node = frontend.sourceNodes["game/Gui/Modules/B"];
+    CHECK_EQ(node->requireSet.count("game/Gui/Modules/A"), 1);
+    REQUIRE_EQ(node->requireLocations.size(), 1);
+    CHECK_EQ(node->requireLocations[0].second, Luau::Location(Position(2, 18), Position(2, 36)));
+
+    // Early parse doesn't cause typechecking to be skipped
+    CheckResult result = frontend.check("game/Gui/Modules/B");
+    LUAU_REQUIRE_ERROR_COUNT(1, result);
+
+    CHECK_EQ("game/Gui/Modules/A", result.errors[0].moduleName);
+    CHECK_EQ("Type 'string' could not be converted into 'number'", toString(result.errors[0]));
 }
 
 TEST_SUITE_END();

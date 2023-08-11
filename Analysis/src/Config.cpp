@@ -4,15 +4,15 @@
 #include "Luau/Lexer.h"
 #include "Luau/StringUtils.h"
 
-namespace
+namespace Luau
 {
 
 using Error = std::optional<std::string>;
 
-}
-
-namespace Luau
+Config::Config()
 {
+    enabledLint.setDefaults();
+}
 
 static Error parseBoolean(bool& result, const std::string& value)
 {

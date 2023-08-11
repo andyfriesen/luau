@@ -8,6 +8,9 @@
 #include <string.h>
 #include <stdio.h>
 
+LUAU_FASTFLAGVARIABLE(LuauFasterInterp, false)
+LUAU_FASTFLAGVARIABLE(LuauFasterFormatS, false)
+
 // macro to `unsign' a character
 #define uchar(c) ((unsigned char)(c))
 
@@ -771,7 +774,7 @@ static void add_s(MatchState* ms, luaL_Buffer* b, const char* s, const char* e)
                 luaL_addchar(b, news[i]);
             }
             else if (news[i] == '0')
-                luaL_addlstring(b, s, e - s);
+                luaL_addlstring(b, s, e - s, -1);
             else
             {
                 push_onecapture(ms, news[i] - '1', s, e);
@@ -854,7 +857,7 @@ static int str_gsub(lua_State* L)
         if (anchor)
             break;
     }
-    luaL_addlstring(&b, src, ms.src_end - src);
+    luaL_addlstring(&b, src, ms.src_end - src, -1);
     luaL_pushresult(&b);
     lua_pushinteger(L, n); // number of substitutions
     return 2;
@@ -891,12 +894,12 @@ static void addquoted(lua_State* L, luaL_Buffer* b, int arg)
         }
         case '\r':
         {
-            luaL_addlstring(b, "\\r", 2);
+            luaL_addlstring(b, "\\r", 2, -1);
             break;
         }
         case '\0':
         {
-            luaL_addlstring(b, "\\000", 4);
+            luaL_addlstring(b, "\\000", 4, -1);
             break;
         }
         default:
@@ -966,6 +969,14 @@ static int str_format(lua_State* L)
             luaL_addchar(&b, *strfrmt++);
         else if (*++strfrmt == L_ESC)
             luaL_addchar(&b, *strfrmt++); // %%
+        else if (FFlag::LuauFasterInterp && *strfrmt == '*')
+        {
+            strfrmt++;
+            if (++arg > top)
+                luaL_error(L, "missing argument #%d", arg);
+
+            luaL_addvalueany(&b, arg);
+        }
         else
         {                          // format item
             char form[MAX_FORMAT]; // to store the format (`%...')
@@ -1012,43 +1023,62 @@ static int str_format(lua_State* L)
             case 'q':
             {
                 addquoted(L, &b, arg);
-                continue; // skip the 'addsize' at the end
+                continue; // skip the 'luaL_addlstring' at the end
             }
             case 's':
             {
                 size_t l;
                 const char* s = luaL_checklstring(L, arg, &l);
-                if (!strchr(form, '.') && l >= 100)
+                if (FFlag::LuauFasterFormatS)
                 {
-                    /* no precision and string is too long to be formatted;
-                       keep original string */
-                    lua_pushvalue(L, arg);
-                    luaL_addvalue(&b);
-                    continue; // skip the `addsize' at the end
+                    // no precision and string is too long to be formatted, or no format necessary to begin with
+                    if (form[2] == '\0' || (!strchr(form, '.') && l >= 100))
+                    {
+                        luaL_addlstring(&b, s, l, -1);
+                        continue; // skip the `luaL_addlstring' at the end
+                    }
+                    else
+                    {
+                        snprintf(buff, sizeof(buff), form, s);
+                        break;
+                    }
                 }
                 else
                 {
-                    snprintf(buff, sizeof(buff), form, s);
-                    break;
+                    if (!strchr(form, '.') && l >= 100)
+                    {
+                        /* no precision and string is too long to be formatted;
+                           keep original string */
+                        lua_pushvalue(L, arg);
+                        luaL_addvalue(&b);
+                        continue; // skip the `luaL_addlstring' at the end
+                    }
+                    else
+                    {
+                        snprintf(buff, sizeof(buff), form, s);
+                        break;
+                    }
                 }
             }
             case '*':
             {
-                if (formatItemSize != 1)
+                if (FFlag::LuauFasterInterp || formatItemSize != 1)
                     luaL_error(L, "'%%*' does not take a form");
 
                 size_t length;
                 const char* string = luaL_tolstring(L, arg, &length);
 
-                luaL_addlstring(&b, string, length);
-                continue; // skip the `addsize' at the end
+                luaL_addlstring(&b, string, length, -2);
+                lua_pop(L, 1);
+
+                continue; // skip the `luaL_addlstring' at the end
             }
             default:
             { // also treat cases `pnLlh'
                 luaL_error(L, "invalid option '%%%c' to 'format'", *(strfrmt - 1));
             }
             }
-            luaL_addlstring(&b, buff, strlen(buff));
+            luaL_addlstring(&b, buff, strlen(buff), -1);
         }
     }
     luaL_pushresult(&b);
@@ -1360,7 +1390,7 @@ static void packint(luaL_Buffer* b, unsigned long long n, int islittle, int size
         for (i = SZINT; i < size; i++) // correct extra bytes
             buff[islittle ? i : size - 1 - i] = (char)MC;
     }
-    luaL_addlstring(b, buff, size); // add result to buffer
+    luaL_addlstring(b, buff, size, -1); // add result to buffer
 }
 
 /*
@@ -1434,7 +1464,7 @@ static int str_pack(lua_State* L)
                 u.n = n;
             // move 'u' to final result, correcting endianness if needed
             copywithendian(buff, u.buff, size, h.islittle);
-            luaL_addlstring(&b, buff, size);
+            luaL_addlstring(&b, buff, size, -1);
             break;
         }
         case Kchar:
@@ -1442,8 +1472,8 @@ static int str_pack(lua_State* L)
             size_t len;
             const char* s = luaL_checklstring(L, arg, &len);
             luaL_argcheck(L, len <= (size_t)size, arg, "string longer than given size");
-            luaL_addlstring(&b, s, len); // add string
-            while (len++ < (size_t)size) // pad extra space
+            luaL_addlstring(&b, s, len, -1); // add string
+            while (len++ < (size_t)size)     // pad extra space
                 luaL_addchar(&b, LUAL_PACKPADBYTE);
             break;
         }
@@ -1453,7 +1483,7 @@ static int str_pack(lua_State* L)
             const char* s = luaL_checklstring(L, arg, &len);
             luaL_argcheck(L, size >= (int)sizeof(size_t) || len < ((size_t)1 << (size * NB)), arg, "string length does not fit in given size");
             packint(&b, len, h.islittle, size, 0); // pack length
-            luaL_addlstring(&b, s, len);
+            luaL_addlstring(&b, s, len, -1);
             totalsize += len;
             break;
         }
@@ -1462,7 +1492,7 @@ static int str_pack(lua_State* L)
             size_t len;
             const char* s = luaL_checklstring(L, arg, &len);
             luaL_argcheck(L, strlen(s) == len, arg, "string contains zeros");
-            luaL_addlstring(&b, s, len);
+            luaL_addlstring(&b, s, len, -1);
             luaL_addchar(&b, '\0'); // add zero at the end
             totalsize += len + 1;
             break;

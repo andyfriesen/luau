@@ -2,11 +2,12 @@
 #include "Luau/Autocomplete.h"
 #include "Luau/BuiltinDefinitions.h"
 #include "Luau/TypeInfer.h"
-#include "Luau/TypeVar.h"
-#include "Luau/VisitTypeVar.h"
+#include "Luau/Type.h"
+#include "Luau/VisitType.h"
 #include "Luau/StringUtils.h"
 
 #include "Fixture.h"
+#include "ScopedFlags.h"
 
 #include "doctest.h"
 
@@ -14,10 +15,11 @@
 
 LUAU_FASTFLAG(LuauTraceTypesInNonstrictMode2)
 LUAU_FASTFLAG(LuauSetMetatableDoesNotTimeTravel)
+LUAU_FASTFLAG(LuauAutocompleteLastTypecheck)
 
 using namespace Luau;
 
-static std::optional<AutocompleteEntryMap> nullCallback(std::string tag, std::optional<const ClassTypeVar*> ptr)
+static std::optional<AutocompleteEntryMap> nullCallback(std::string tag, std::optional<const ClassType*> ptr, std::optional<std::string> contents)
 {
     return std::nullopt;
 }
@@ -32,12 +34,38 @@ struct ACFixtureImpl : BaseType
 
     AutocompleteResult autocomplete(unsigned row, unsigned column)
     {
+        if (FFlag::LuauAutocompleteLastTypecheck)
+        {
+            FrontendOptions opts;
+            opts.forAutocomplete = true;
+            this->frontend.check("MainModule", opts);
+        }
+
         return Luau::autocomplete(this->frontend, "MainModule", Position{row, column}, nullCallback);
     }
 
-    AutocompleteResult autocomplete(char marker)
+    AutocompleteResult autocomplete(char marker, StringCompletionCallback callback = nullCallback)
     {
-        return Luau::autocomplete(this->frontend, "MainModule", getPosition(marker), nullCallback);
+        if (FFlag::LuauAutocompleteLastTypecheck)
+        {
+            FrontendOptions opts;
+            opts.forAutocomplete = true;
+            this->frontend.check("MainModule", opts);
+        }
+
+        return Luau::autocomplete(this->frontend, "MainModule", getPosition(marker), callback);
+    }
+
+    AutocompleteResult autocomplete(const ModuleName& name, Position pos, StringCompletionCallback callback = nullCallback)
+    {
+        if (FFlag::LuauAutocompleteLastTypecheck)
+        {
+            FrontendOptions opts;
+            opts.forAutocomplete = true;
+            this->frontend.check(name, opts);
+        }
+
+        return Luau::autocomplete(this->frontend, name, pos, callback);
     }
 
     CheckResult check(const std::string& source)
@@ -82,10 +110,11 @@ struct ACFixtureImpl : BaseType
 
     LoadDefinitionFileResult loadDefinition(const std::string& source)
     {
-        TypeChecker& typeChecker = this->frontend.typeCheckerForAutocomplete;
-        unfreeze(typeChecker.globalTypes);
-        LoadDefinitionFileResult result = loadDefinitionFile(typeChecker, typeChecker.globalScope, source, "@test");
-        freeze(typeChecker.globalTypes);
+        GlobalTypes& globals = this->frontend.globalsForAutocomplete;
+        unfreeze(globals.globalTypes);
+        LoadDefinitionFileResult result = this->frontend.loadDefinitionFile(
+            globals, globals.globalScope, source, "@test", /* captureComments */ false, /* typeCheckForAutocomplete */ true);
+        freeze(globals.globalTypes);
 
         REQUIRE_MESSAGE(result.success, "loadDefinition: unable to load definition file");
         return result;
@@ -97,7 +126,7 @@ struct ACFixtureImpl : BaseType
         LUAU_ASSERT(i != markerPosition.end());
         return i->second;
     }
-
+    ScopedFastFlag flag{"LuauAutocompleteHideSelfArg", true};
     // Maps a marker character (0-9 inclusive) to a position in the source code.
     std::map<char, Position> markerPosition;
 };
@@ -107,10 +136,10 @@ struct ACFixture : ACFixtureImpl<Fixture>
     ACFixture()
         : ACFixtureImpl<Fixture>()
     {
-        addGlobalBinding(frontend, "table", Binding{typeChecker.anyType});
-        addGlobalBinding(frontend, "math", Binding{typeChecker.anyType});
-        addGlobalBinding(frontend.typeCheckerForAutocomplete, "table", Binding{typeChecker.anyType});
-        addGlobalBinding(frontend.typeCheckerForAutocomplete, "math", Binding{typeChecker.anyType});
+        addGlobalBinding(frontend.globals, "table", Binding{builtinTypes->anyType});
+        addGlobalBinding(frontend.globals, "math", Binding{builtinTypes->anyType});
+        addGlobalBinding(frontend.globalsForAutocomplete, "table", Binding{builtinTypes->anyType});
+        addGlobalBinding(frontend.globalsForAutocomplete, "math", Binding{builtinTypes->anyType});
     }
 };
 
@@ -378,7 +407,7 @@ TEST_CASE_FIXTURE(ACFixture, "table_intersection")
 {
     check(R"(
         type t1 = { a1 : string, b2 : number }
-        type t2 = { b2 : string, c3 : string }
+        type t2 = { b2 : number, c3 : string }
         function func(abc : t1 & t2)
             abc.  @1
         end
@@ -498,7 +527,7 @@ TEST_CASE_FIXTURE(ACFixture, "bias_toward_inner_scope")
     CHECK_EQ(ac.context, AutocompleteContext::Statement);
 
     TypeId t = follow(*ac.entryMap["A"].type);
-    const TableTypeVar* tt = get<TableTypeVar>(t);
+    const TableType* tt = get<TableType>(t);
     REQUIRE(tt);
 
     CHECK(tt->props.count("two"));
@@ -627,9 +656,10 @@ TEST_CASE_FIXTURE(ACFixture, "autocomplete_for_middle_keywords")
     )");
 
     auto ac5 = autocomplete('1');
-    CHECK_EQ(ac5.entryMap.count("do"), 1);
+    CHECK_EQ(ac5.entryMap.count("math"), 1);
+    CHECK_EQ(ac5.entryMap.count("do"), 0);
     CHECK_EQ(ac5.entryMap.count("end"), 0);
-    CHECK_EQ(ac5.context, AutocompleteContext::Keyword);
+    CHECK_EQ(ac5.context, AutocompleteContext::Expression);
 
     check(R"(
         for x = 1, 2, 5 f@1
@@ -647,6 +677,28 @@ TEST_CASE_FIXTURE(ACFixture, "autocomplete_for_middle_keywords")
     auto ac7 = autocomplete('1');
     CHECK_EQ(ac7.entryMap.count("end"), 1);
     CHECK_EQ(ac7.context, AutocompleteContext::Statement);
+
+    check(R"(local Foo = 1
+        for x = @11, @22, @35
+    )");
+
+    for (int i = 0; i < 3; ++i)
+    {
+        auto ac8 = autocomplete('1' + i);
+        CHECK_EQ(ac8.entryMap.count("Foo"), 1);
+        CHECK_EQ(ac8.entryMap.count("do"), 0);
+    }
+
+    check(R"(local Foo = 1
+        for x = @11, @22
+    )");
+
+    for (int i = 0; i < 2; ++i)
+    {
+        auto ac9 = autocomplete('1' + i);
+        CHECK_EQ(ac9.entryMap.count("Foo"), 1);
+        CHECK_EQ(ac9.entryMap.count("do"), 0);
+    }
 }
 
 TEST_CASE_FIXTURE(ACFixture, "autocomplete_for_in_middle_keywords")
@@ -738,8 +790,10 @@ TEST_CASE_FIXTURE(ACFixture, "autocomplete_while_middle_keywords")
     )");
 
     auto ac2 = autocomplete('1');
-    CHECK_EQ(1, ac2.entryMap.size());
+    CHECK_EQ(3, ac2.entryMap.size());
     CHECK_EQ(ac2.entryMap.count("do"), 1);
+    CHECK_EQ(ac2.entryMap.count("and"), 1);
+    CHECK_EQ(ac2.entryMap.count("or"), 1);
     CHECK_EQ(ac2.context, AutocompleteContext::Keyword);
 
     check(R"(
@@ -755,9 +809,20 @@ TEST_CASE_FIXTURE(ACFixture, "autocomplete_while_middle_keywords")
     )");
 
     auto ac4 = autocomplete('1');
-    CHECK_EQ(1, ac4.entryMap.size());
+    CHECK_EQ(3, ac4.entryMap.size());
     CHECK_EQ(ac4.entryMap.count("do"), 1);
+    CHECK_EQ(ac4.entryMap.count("and"), 1);
+    CHECK_EQ(ac4.entryMap.count("or"), 1);
     CHECK_EQ(ac4.context, AutocompleteContext::Keyword);
+
+    check(R"(
+        while t@1
+    )");
+
+    auto ac5 = autocomplete('1');
+    CHECK_EQ(ac5.entryMap.count("do"), 0);
+    CHECK_EQ(ac5.entryMap.count("true"), 1);
+    CHECK_EQ(ac5.entryMap.count("false"), 1);
 }
 
 TEST_CASE_FIXTURE(ACFixture, "autocomplete_if_middle_keywords")
@@ -793,8 +858,10 @@ TEST_CASE_FIXTURE(ACFixture, "autocomplete_if_middle_keywords")
     )");
 
     auto ac3 = autocomplete('1');
-    CHECK_EQ(1, ac3.entryMap.size());
+    CHECK_EQ(3, ac3.entryMap.size());
     CHECK_EQ(ac3.entryMap.count("then"), 1);
+    CHECK_EQ(ac3.entryMap.count("and"), 1);
+    CHECK_EQ(ac3.entryMap.count("or"), 1);
     CHECK_EQ(ac3.context, AutocompleteContext::Keyword);
 
     check(R"(
@@ -838,6 +905,20 @@ TEST_CASE_FIXTURE(ACFixture, "autocomplete_if_middle_keywords")
     CHECK_EQ(ac5.entryMap.count("elseif"), 0);
     CHECK_EQ(ac5.entryMap.count("end"), 0);
     CHECK_EQ(ac5.context, AutocompleteContext::Statement);
+
+    check(R"(
+        if t@1
+    )");
+
+    auto ac6 = autocomplete('1');
+    CHECK_EQ(ac6.entryMap.count("true"), 1);
+    CHECK_EQ(ac6.entryMap.count("false"), 1);
+    CHECK_EQ(ac6.entryMap.count("then"), 0);
+    CHECK_EQ(ac6.entryMap.count("function"), 1);
+    CHECK_EQ(ac6.entryMap.count("else"), 0);
+    CHECK_EQ(ac6.entryMap.count("elseif"), 0);
+    CHECK_EQ(ac6.entryMap.count("end"), 0);
+    CHECK_EQ(ac6.context, AutocompleteContext::Expression);
 }
 
 TEST_CASE_FIXTURE(ACFixture, "autocomplete_until_in_repeat")
@@ -1243,7 +1324,7 @@ end
 
     REQUIRE(ac.entryMap.count("Table"));
     REQUIRE(ac.entryMap["Table"].type);
-    const TableTypeVar* tv = get<TableTypeVar>(follow(*ac.entryMap["Table"].type));
+    const TableType* tv = get<TableType>(follow(*ac.entryMap["Table"].type));
     REQUIRE(tv);
     CHECK(tv->props.count("x"));
 }
@@ -1265,7 +1346,7 @@ local a: aa
 
     frontend.check("Module/B");
 
-    auto ac = Luau::autocomplete(frontend, "Module/B", Position{2, 11}, nullCallback);
+    auto ac = autocomplete("Module/B", Position{2, 11});
 
     CHECK(ac.entryMap.count("aaa"));
     CHECK_EQ(ac.context, AutocompleteContext::Type);
@@ -1288,7 +1369,7 @@ local a: aaa.
 
     frontend.check("Module/B");
 
-    auto ac = Luau::autocomplete(frontend, "Module/B", Position{2, 13}, nullCallback);
+    auto ac = autocomplete("Module/B", Position{2, 13});
 
     CHECK_EQ(2, ac.entryMap.size());
     CHECK(ac.entryMap.count("A"));
@@ -1945,7 +2026,7 @@ ex.a(function(x:
 
     frontend.check("Module/B");
 
-    auto ac = Luau::autocomplete(frontend, "Module/B", Position{2, 16}, nullCallback);
+    auto ac = autocomplete("Module/B", Position{2, 16});
 
     CHECK(!ac.entryMap.count("done"));
 
@@ -1956,7 +2037,7 @@ ex.b(function(x:
 
     frontend.check("Module/C");
 
-    ac = Luau::autocomplete(frontend, "Module/C", Position{2, 16}, nullCallback);
+    ac = autocomplete("Module/C", Position{2, 16});
 
     CHECK(!ac.entryMap.count("(done) -> number"));
 }
@@ -1979,7 +2060,7 @@ ex.a(function(x:
 
     frontend.check("Module/B");
 
-    auto ac = Luau::autocomplete(frontend, "Module/B", Position{2, 16}, nullCallback);
+    auto ac = autocomplete("Module/B", Position{2, 16});
 
     CHECK(!ac.entryMap.count("done"));
     CHECK(ac.entryMap.count("ex.done"));
@@ -1992,7 +2073,7 @@ ex.b(function(x:
 
     frontend.check("Module/C");
 
-    ac = Luau::autocomplete(frontend, "Module/C", Position{2, 16}, nullCallback);
+    ac = autocomplete("Module/C", Position{2, 16});
 
     CHECK(!ac.entryMap.count("(done) -> number"));
     CHECK(ac.entryMap.count("(ex.done) -> number"));
@@ -2306,7 +2387,7 @@ local a: aaa.do
 
     frontend.check("Module/B");
 
-    auto ac = Luau::autocomplete(frontend, "Module/B", Position{2, 15}, nullCallback);
+    auto ac = autocomplete("Module/B", Position{2, 15});
 
     CHECK_EQ(2, ac.entryMap.size());
     CHECK(ac.entryMap.count("done"));
@@ -2318,7 +2399,7 @@ TEST_CASE_FIXTURE(ACFixture, "comments")
 {
     fileResolver.source["Comments"] = "--!str";
 
-    auto ac = Luau::autocomplete(frontend, "Comments", Position{0, 6}, nullCallback);
+    auto ac = autocomplete("Comments", Position{0, 6});
     CHECK_EQ(0, ac.entryMap.size());
 }
 
@@ -2337,7 +2418,7 @@ TEST_CASE_FIXTURE(ACBuiltinsFixture, "autocompleteProp_index_function_metamethod
         --          | Column 20
     )";
 
-    auto ac = Luau::autocomplete(frontend, "Module/A", Position{9, 20}, nullCallback);
+    auto ac = autocomplete("Module/A", Position{9, 20});
     REQUIRE_EQ(1, ac.entryMap.size());
     CHECK(ac.entryMap.count("x"));
 }
@@ -2430,7 +2511,7 @@ TEST_CASE_FIXTURE(ACFixture, "not_the_var_we_are_defining")
 {
     fileResolver.source["Module/A"] = "abc,de";
 
-    auto ac = Luau::autocomplete(frontend, "Module/A", Position{0, 6}, nullCallback);
+    auto ac = autocomplete("Module/A", Position{0, 6});
     CHECK(!ac.entryMap.count("de"));
 }
 
@@ -2441,7 +2522,7 @@ TEST_CASE_FIXTURE(ACFixture, "recursive_function_global")
 end
 )";
 
-    auto ac = Luau::autocomplete(frontend, "global", Position{1, 0}, nullCallback);
+    auto ac = autocomplete("global", Position{1, 0});
     CHECK(ac.entryMap.count("abc"));
 }
 
@@ -2454,7 +2535,7 @@ TEST_CASE_FIXTURE(ACFixture, "recursive_function_local")
 end
 )";
 
-    auto ac = Luau::autocomplete(frontend, "local", Position{1, 0}, nullCallback);
+    auto ac = autocomplete("local", Position{1, 0});
     CHECK(ac.entryMap.count("abc"));
 }
 
@@ -2708,13 +2789,69 @@ a = if temp then even else abc@3
     CHECK(ac.entryMap.count("abcdef"));
 }
 
-TEST_CASE_FIXTURE(ACFixture, "autocomplete_interpolated_string")
+TEST_CASE_FIXTURE(ACFixture, "autocomplete_interpolated_string_constant")
+{
+    check(R"(f(`@1`))");
+    auto ac = autocomplete('1');
+    CHECK(ac.entryMap.empty());
+    CHECK_EQ(ac.context, AutocompleteContext::String);
+
+    check(R"(f(`@1 {"a"}`))");
+    ac = autocomplete('1');
+    CHECK(ac.entryMap.empty());
+    CHECK_EQ(ac.context, AutocompleteContext::String);
+
+    check(R"(f(`{"a"} @1`))");
+    ac = autocomplete('1');
+    CHECK(ac.entryMap.empty());
+    CHECK_EQ(ac.context, AutocompleteContext::String);
+
+    check(R"(f(`{"a"} @1 {"b"}`))");
+    ac = autocomplete('1');
+    CHECK(ac.entryMap.empty());
+    CHECK_EQ(ac.context, AutocompleteContext::String);
+}
+
+TEST_CASE_FIXTURE(ACFixture, "autocomplete_interpolated_string_expression")
 {
     check(R"(f(`expression = {@1}`))");
+    auto ac = autocomplete('1');
+    CHECK(ac.entryMap.count("table"));
+    CHECK_EQ(ac.context, AutocompleteContext::Expression);
+}
+
+TEST_CASE_FIXTURE(ACFixture, "autocomplete_interpolated_string_expression_with_comments")
+{
+    check(R"(f(`expression = {--[[ bla bla bla ]]@1`))");
 
     auto ac = autocomplete('1');
     CHECK(ac.entryMap.count("table"));
     CHECK_EQ(ac.context, AutocompleteContext::Expression);
+
+    check(R"(f(`expression = {@1 --[[ bla bla bla ]]`))");
+    ac = autocomplete('1');
+    CHECK(!ac.entryMap.empty());
+    CHECK(ac.entryMap.count("table"));
+    CHECK_EQ(ac.context, AutocompleteContext::Expression);
+}
+
+TEST_CASE_FIXTURE(ACFixture, "autocomplete_interpolated_string_as_singleton")
+{
+    check(R"(
+        --!strict
+        local function f(a: "cat" | "dog") end
+
+        f(`@1`)
+        f(`uhhh{'try'}@2`)
+    )");
+
+    auto ac = autocomplete('1');
+    CHECK(ac.entryMap.count("cat"));
+    CHECK_EQ(ac.context, AutocompleteContext::String);
+
+    ac = autocomplete('2');
+    CHECK(ac.entryMap.empty());
+    CHECK_EQ(ac.context, AutocompleteContext::String);
 }
 
 TEST_CASE_FIXTURE(ACFixture, "autocomplete_explicit_type_pack")
@@ -2883,6 +3020,69 @@ TEST_CASE_FIXTURE(ACFixture, "autocomplete_string_singletons")
     CHECK_EQ(ac.context, AutocompleteContext::String);
 }
 
+TEST_CASE_FIXTURE(ACFixture, "string_singleton_as_table_key")
+{
+    check(R"(
+        type Direction = "up" | "down"
+
+        local a: {[Direction]: boolean} = {[@1] = true}
+        local b: {[Direction]: boolean} = {["@2"] = true}
+        local c: {[Direction]: boolean} = {u@3 = true}
+        local d: {[Direction]: boolean} = {[u@4] = true}
+
+        local e: {[Direction]: boolean} = {[@5]}
+        local f: {[Direction]: boolean} = {["@6"]}
+        local g: {[Direction]: boolean} = {u@7}
+        local h: {[Direction]: boolean} = {[u@8]}
+    )");
+
+    auto ac = autocomplete('1');
+
+    CHECK(ac.entryMap.count("\"up\""));
+    CHECK(ac.entryMap.count("\"down\""));
+
+    ac = autocomplete('2');
+
+    CHECK(ac.entryMap.count("up"));
+    CHECK(ac.entryMap.count("down"));
+
+    ac = autocomplete('3');
+
+    CHECK(ac.entryMap.count("up"));
+    CHECK(ac.entryMap.count("down"));
+
+    ac = autocomplete('4');
+
+    CHECK(!ac.entryMap.count("up"));
+    CHECK(!ac.entryMap.count("down"));
+
+    CHECK(ac.entryMap.count("\"up\""));
+    CHECK(ac.entryMap.count("\"down\""));
+
+    ac = autocomplete('5');
+
+    CHECK(ac.entryMap.count("\"up\""));
+    CHECK(ac.entryMap.count("\"down\""));
+
+    ac = autocomplete('6');
+
+    CHECK(ac.entryMap.count("up"));
+    CHECK(ac.entryMap.count("down"));
+
+    ac = autocomplete('7');
+
+    CHECK(ac.entryMap.count("up"));
+    CHECK(ac.entryMap.count("down"));
+
+    ac = autocomplete('8');
+
+    CHECK(!ac.entryMap.count("up"));
+    CHECK(!ac.entryMap.count("down"));
+
+    CHECK(ac.entryMap.count("\"up\""));
+    CHECK(ac.entryMap.count("\"down\""));
+}
+
 TEST_CASE_FIXTURE(ACFixture, "autocomplete_string_singleton_equality")
 {
     check(R"(
@@ -2955,8 +3155,6 @@ local abc = b@1
 
 TEST_CASE_FIXTURE(ACFixture, "no_incompatible_self_calls_on_class")
 {
-    ScopedFastFlag selfCallAutocompleteFix3{"LuauSelfCallAutocompleteFix3", true};
-
     loadDefinition(R"(
 declare class Foo
     function one(self): number
@@ -2976,6 +3174,8 @@ t:@1
         REQUIRE(ac.entryMap.count("two"));
         CHECK(!ac.entryMap["one"].wrongIndexType);
         CHECK(ac.entryMap["two"].wrongIndexType);
+        CHECK(ac.entryMap["one"].indexedWithSelf);
+        CHECK(ac.entryMap["two"].indexedWithSelf);
     }
 
     {
@@ -2990,13 +3190,27 @@ t.@1
         REQUIRE(ac.entryMap.count("two"));
         CHECK(ac.entryMap["one"].wrongIndexType);
         CHECK(!ac.entryMap["two"].wrongIndexType);
+        CHECK(!ac.entryMap["one"].indexedWithSelf);
+        CHECK(!ac.entryMap["two"].indexedWithSelf);
     }
+}
+
+TEST_CASE_FIXTURE(ACFixture, "simple")
+{
+    check(R"(
+local t = {}
+function t:m() end
+t:m()
+    )");
+
+    // auto ac = autocomplete('1');
+
+    //  REQUIRE(ac.entryMap.count("m"));
+    // CHECK(!ac.entryMap["m"].wrongIndexType);
 }
 
 TEST_CASE_FIXTURE(ACFixture, "do_compatible_self_calls")
 {
-    ScopedFastFlag selfCallAutocompleteFix3{"LuauSelfCallAutocompleteFix3", true};
-
     check(R"(
 local t = {}
 function t:m() end
@@ -3007,12 +3221,11 @@ t:@1
 
     REQUIRE(ac.entryMap.count("m"));
     CHECK(!ac.entryMap["m"].wrongIndexType);
+    CHECK(ac.entryMap["m"].indexedWithSelf);
 }
 
 TEST_CASE_FIXTURE(ACFixture, "no_incompatible_self_calls")
 {
-    ScopedFastFlag selfCallAutocompleteFix3{"LuauSelfCallAutocompleteFix3", true};
-
     check(R"(
 local t = {}
 function t.m() end
@@ -3023,12 +3236,11 @@ t:@1
 
     REQUIRE(ac.entryMap.count("m"));
     CHECK(ac.entryMap["m"].wrongIndexType);
+    CHECK(ac.entryMap["m"].indexedWithSelf);
 }
 
 TEST_CASE_FIXTURE(ACFixture, "no_incompatible_self_calls_2")
 {
-    ScopedFastFlag selfCallAutocompleteFix3{"LuauSelfCallAutocompleteFix3", true};
-
     check(R"(
 local f: (() -> number) & ((number) -> number) = function(x: number?) return 2 end
 local t = {}
@@ -3040,6 +3252,7 @@ t:@1
 
     REQUIRE(ac.entryMap.count("f"));
     CHECK(ac.entryMap["f"].wrongIndexType);
+    CHECK(ac.entryMap["f"].indexedWithSelf);
 }
 
 TEST_CASE_FIXTURE(ACFixture, "do_wrong_compatible_self_calls")
@@ -3055,12 +3268,26 @@ t:@1
     REQUIRE(ac.entryMap.count("m"));
     // We can make changes to mark this as a wrong way to call even though it's compatible
     CHECK(!ac.entryMap["m"].wrongIndexType);
+    CHECK(ac.entryMap["m"].indexedWithSelf);
+}
+
+TEST_CASE_FIXTURE(ACFixture, "do_wrong_compatible_nonself_calls")
+{
+    check(R"(
+local t = {}
+function t:m(x: string) end
+t.@1
+    )");
+
+    auto ac = autocomplete('1');
+
+    REQUIRE(ac.entryMap.count("m"));
+    CHECK(!ac.entryMap["m"].wrongIndexType);
+    CHECK(!ac.entryMap["m"].indexedWithSelf);
 }
 
 TEST_CASE_FIXTURE(ACFixture, "no_wrong_compatible_self_calls_with_generics")
 {
-    ScopedFastFlag selfCallAutocompleteFix3{"LuauSelfCallAutocompleteFix3", true};
-
     check(R"(
 local t = {}
 function t.m<T>(a: T) end
@@ -3072,12 +3299,11 @@ t:@1
     REQUIRE(ac.entryMap.count("m"));
     // While this call is compatible with the type, this requires instantiation of a generic type which we don't perform
     CHECK(ac.entryMap["m"].wrongIndexType);
+    CHECK(ac.entryMap["m"].indexedWithSelf);
 }
 
 TEST_CASE_FIXTURE(ACFixture, "string_prim_self_calls_are_fine")
 {
-    ScopedFastFlag selfCallAutocompleteFix3{"LuauSelfCallAutocompleteFix3", true};
-
     check(R"(
 local s = "hello"
 s:@1
@@ -3087,16 +3313,17 @@ s:@1
 
     REQUIRE(ac.entryMap.count("byte"));
     CHECK(ac.entryMap["byte"].wrongIndexType == false);
+    CHECK(ac.entryMap["byte"].indexedWithSelf);
     REQUIRE(ac.entryMap.count("char"));
     CHECK(ac.entryMap["char"].wrongIndexType == true);
+    CHECK(ac.entryMap["char"].indexedWithSelf);
     REQUIRE(ac.entryMap.count("sub"));
     CHECK(ac.entryMap["sub"].wrongIndexType == false);
+    CHECK(ac.entryMap["sub"].indexedWithSelf);
 }
 
 TEST_CASE_FIXTURE(ACFixture, "string_prim_non_self_calls_are_avoided")
 {
-    ScopedFastFlag selfCallAutocompleteFix3{"LuauSelfCallAutocompleteFix3", true};
-
     check(R"(
 local s = "hello"
 s.@1
@@ -3106,14 +3333,14 @@ s.@1
 
     REQUIRE(ac.entryMap.count("char"));
     CHECK(ac.entryMap["char"].wrongIndexType == false);
+    CHECK(!ac.entryMap["char"].indexedWithSelf);
     REQUIRE(ac.entryMap.count("sub"));
     CHECK(ac.entryMap["sub"].wrongIndexType == true);
+    CHECK(!ac.entryMap["sub"].indexedWithSelf);
 }
 
 TEST_CASE_FIXTURE(ACBuiltinsFixture, "library_non_self_calls_are_fine")
 {
-    ScopedFastFlag selfCallAutocompleteFix3{"LuauSelfCallAutocompleteFix3", true};
-
     check(R"(
 string.@1
     )");
@@ -3122,10 +3349,13 @@ string.@1
 
     REQUIRE(ac.entryMap.count("byte"));
     CHECK(ac.entryMap["byte"].wrongIndexType == false);
+    CHECK(!ac.entryMap["byte"].indexedWithSelf);
     REQUIRE(ac.entryMap.count("char"));
     CHECK(ac.entryMap["char"].wrongIndexType == false);
+    CHECK(!ac.entryMap["char"].indexedWithSelf);
     REQUIRE(ac.entryMap.count("sub"));
     CHECK(ac.entryMap["sub"].wrongIndexType == false);
+    CHECK(!ac.entryMap["sub"].indexedWithSelf);
 
     check(R"(
 table.@1
@@ -3135,16 +3365,17 @@ table.@1
 
     REQUIRE(ac.entryMap.count("remove"));
     CHECK(ac.entryMap["remove"].wrongIndexType == false);
+    CHECK(!ac.entryMap["remove"].indexedWithSelf);
     REQUIRE(ac.entryMap.count("getn"));
     CHECK(ac.entryMap["getn"].wrongIndexType == false);
+    CHECK(!ac.entryMap["getn"].indexedWithSelf);
     REQUIRE(ac.entryMap.count("insert"));
     CHECK(ac.entryMap["insert"].wrongIndexType == false);
+    CHECK(!ac.entryMap["insert"].indexedWithSelf);
 }
 
 TEST_CASE_FIXTURE(ACBuiltinsFixture, "library_self_calls_are_invalid")
 {
-    ScopedFastFlag selfCallAutocompleteFix3{"LuauSelfCallAutocompleteFix3", true};
-
     check(R"(
 string:@1
     )");
@@ -3153,13 +3384,16 @@ string:@1
 
     REQUIRE(ac.entryMap.count("byte"));
     CHECK(ac.entryMap["byte"].wrongIndexType == true);
+    CHECK(ac.entryMap["byte"].indexedWithSelf);
     REQUIRE(ac.entryMap.count("char"));
     CHECK(ac.entryMap["char"].wrongIndexType == true);
+    CHECK(ac.entryMap["char"].indexedWithSelf);
 
     // We want the next test to evaluate to 'true', but we have to allow function defined with 'self' to be callable with ':'
     // We may change the definition of the string metatable to not use 'self' types in the future (like byte/char/pack/unpack)
     REQUIRE(ac.entryMap.count("sub"));
     CHECK(ac.entryMap["sub"].wrongIndexType == false);
+    CHECK(ac.entryMap["sub"].indexedWithSelf);
 }
 
 TEST_CASE_FIXTURE(ACFixture, "source_module_preservation_and_invalidation")
@@ -3217,6 +3451,583 @@ TEST_CASE_FIXTURE(ACFixture, "globals_are_order_independent")
     CHECK(ac.entryMap.count("myInnerLocal"));
     CHECK(ac.entryMap.count("abc0"));
     CHECK(ac.entryMap.count("abc1"));
+}
+
+TEST_CASE_FIXTURE(ACFixture, "string_contents_is_available_to_callback")
+{
+    loadDefinition(R"(
+        declare function require(path: string): any
+    )");
+
+    std::optional<Binding> require = frontend.globalsForAutocomplete.globalScope->linearSearchForBinding("require");
+    REQUIRE(require);
+    Luau::unfreeze(frontend.globalsForAutocomplete.globalTypes);
+    attachTag(require->typeId, "RequireCall");
+    Luau::freeze(frontend.globalsForAutocomplete.globalTypes);
+
+    check(R"(
+        local x = require("testing/@1")
+    )");
+
+    bool isCorrect = false;
+    auto ac1 = autocomplete(
+        '1', [&isCorrect](std::string, std::optional<const ClassType*>, std::optional<std::string> contents) -> std::optional<AutocompleteEntryMap> {
+            isCorrect = contents && *contents == "testing/";
+            return std::nullopt;
+        });
+
+    CHECK(isCorrect);
+}
+
+TEST_CASE_FIXTURE(ACFixture, "autocomplete_response_perf1" * doctest::timeout(0.5))
+{
+    // Build a function type with a large overload set
+    const int parts = 100;
+    std::string source;
+
+    for (int i = 0; i < parts; i++)
+        formatAppend(source, "type T%d = { f%d: number }\n", i, i);
+
+    source += "type Instance = { new: (('s0', extra: Instance?) -> T0)";
+
+    for (int i = 1; i < parts; i++)
+        formatAppend(source, " & (('s%d', extra: Instance?) -> T%d)", i, i);
+
+    source += " }\n";
+
+    source += "local Instance: Instance = {} :: any\n";
+    source += "local function c(): boolean return t@1 end\n";
+
+    check(source);
+
+    auto ac = autocomplete('1');
+
+    CHECK(ac.entryMap.count("true"));
+    CHECK(ac.entryMap.count("Instance"));
+}
+
+TEST_CASE_FIXTURE(ACFixture, "strict_mode_force")
+{
+    check(R"(
+--!nonstrict
+local a: {x: number} = {x=1}
+local b = a
+local c = b.@1
+    )");
+
+    auto ac = autocomplete('1');
+
+    CHECK_EQ(1, ac.entryMap.size());
+    CHECK(ac.entryMap.count("x"));
+}
+
+TEST_CASE_FIXTURE(ACFixture, "suggest_exported_types")
+{
+    check(R"(
+export type Type = {a: number}
+local a: T@1
+    )");
+
+    auto ac = autocomplete('1');
+
+    CHECK(ac.entryMap.count("Type"));
+    CHECK_EQ(ac.context, AutocompleteContext::Type);
+}
+
+TEST_CASE_FIXTURE(ACFixture, "frontend_use_correct_global_scope")
+{
+    loadDefinition(R"(
+        declare class Instance
+            Name: string
+        end
+    )");
+
+    CheckResult result = check(R"(
+        local a: unknown = nil
+        if typeof(a) == "Instance" then
+            local b = a.@1
+        end
+    )");
+    auto ac = autocomplete('1');
+
+    CHECK_EQ(1, ac.entryMap.size());
+    CHECK(ac.entryMap.count("Name"));
+}
+
+TEST_CASE_FIXTURE(ACFixture, "string_completion_outside_quotes")
+{
+    ScopedFastFlag flag{"LuauDisableCompletionOutsideQuotes", true};
+
+    loadDefinition(R"(
+        declare function require(path: string): any
+    )");
+
+    std::optional<Binding> require = frontend.globalsForAutocomplete.globalScope->linearSearchForBinding("require");
+    REQUIRE(require);
+    Luau::unfreeze(frontend.globalsForAutocomplete.globalTypes);
+    attachTag(require->typeId, "RequireCall");
+    Luau::freeze(frontend.globalsForAutocomplete.globalTypes);
+
+    check(R"(
+        local x = require(@1"@2"@3)
+    )");
+
+    StringCompletionCallback callback = [](std::string, std::optional<const ClassType*>,
+                                            std::optional<std::string> contents) -> std::optional<AutocompleteEntryMap>
+    {
+        Luau::AutocompleteEntryMap results = {{"test", Luau::AutocompleteEntry{Luau::AutocompleteEntryKind::String, std::nullopt, false, false}}};
+        return results;
+    };
+
+    auto ac = autocomplete('2', callback);
+
+    CHECK_EQ(1, ac.entryMap.size());
+    CHECK(ac.entryMap.count("test"));
+
+    ac = autocomplete('1', callback);
+
+    CHECK_EQ(0, ac.entryMap.size());
+
+    ac = autocomplete('3', callback);
+
+    CHECK_EQ(0, ac.entryMap.size());
+}
+
+TEST_CASE_FIXTURE(ACFixture, "anonymous_autofilled_empty")
+{
+    ScopedFastFlag flag{"LuauAnonymousAutofilled1", true};
+
+    check(R"(
+local function foo(a: () -> ())
+    a()
+end
+
+foo(@1)
+    )");
+
+    const std::optional<std::string> EXPECTED_INSERT = "function()  end";
+
+    auto ac = autocomplete('1');
+
+    REQUIRE(ac.entryMap.count(kGeneratedAnonymousFunctionEntryName) == 1);
+    CHECK(ac.entryMap[kGeneratedAnonymousFunctionEntryName].kind == Luau::AutocompleteEntryKind::GeneratedFunction);
+    CHECK(ac.entryMap[kGeneratedAnonymousFunctionEntryName].typeCorrect == Luau::TypeCorrectKind::Correct);
+    REQUIRE(ac.entryMap[kGeneratedAnonymousFunctionEntryName].insertText);
+    CHECK_EQ(EXPECTED_INSERT, *ac.entryMap[kGeneratedAnonymousFunctionEntryName].insertText);
+}
+
+TEST_CASE_FIXTURE(ACFixture, "anonymous_autofilled_args")
+{
+    ScopedFastFlag flag{"LuauAnonymousAutofilled1", true};
+
+    check(R"(
+local function foo(a: (number, string) -> ())
+    a()
+end
+
+foo(@1)
+    )");
+
+    const std::optional<std::string> EXPECTED_INSERT = "function(a0: number, a1: string)  end";
+
+    auto ac = autocomplete('1');
+
+    REQUIRE(ac.entryMap.count(kGeneratedAnonymousFunctionEntryName) == 1);
+    CHECK(ac.entryMap[kGeneratedAnonymousFunctionEntryName].kind == Luau::AutocompleteEntryKind::GeneratedFunction);
+    CHECK(ac.entryMap[kGeneratedAnonymousFunctionEntryName].typeCorrect == Luau::TypeCorrectKind::Correct);
+    REQUIRE(ac.entryMap[kGeneratedAnonymousFunctionEntryName].insertText);
+    CHECK_EQ(EXPECTED_INSERT, *ac.entryMap[kGeneratedAnonymousFunctionEntryName].insertText);
+}
+
+TEST_CASE_FIXTURE(ACFixture, "anonymous_autofilled_args_single_return")
+{
+    ScopedFastFlag flag{"LuauAnonymousAutofilled1", true};
+
+    check(R"(
+local function foo(a: (number, string) -> (string))
+    a()
+end
+
+foo(@1)
+    )");
+
+    const std::optional<std::string> EXPECTED_INSERT = "function(a0: number, a1: string): string  end";
+
+    auto ac = autocomplete('1');
+
+    REQUIRE(ac.entryMap.count(kGeneratedAnonymousFunctionEntryName) == 1);
+    CHECK(ac.entryMap[kGeneratedAnonymousFunctionEntryName].kind == Luau::AutocompleteEntryKind::GeneratedFunction);
+    CHECK(ac.entryMap[kGeneratedAnonymousFunctionEntryName].typeCorrect == Luau::TypeCorrectKind::Correct);
+    REQUIRE(ac.entryMap[kGeneratedAnonymousFunctionEntryName].insertText);
+    CHECK_EQ(EXPECTED_INSERT, *ac.entryMap[kGeneratedAnonymousFunctionEntryName].insertText);
+}
+
+TEST_CASE_FIXTURE(ACFixture, "anonymous_autofilled_args_multi_return")
+{
+    ScopedFastFlag flag{"LuauAnonymousAutofilled1", true};
+
+    check(R"(
+local function foo(a: (number, string) -> (string, number))
+    a()
+end
+
+foo(@1)
+    )");
+
+    const std::optional<std::string> EXPECTED_INSERT = "function(a0: number, a1: string): (string, number)  end";
+
+    auto ac = autocomplete('1');
+
+    REQUIRE(ac.entryMap.count(kGeneratedAnonymousFunctionEntryName) == 1);
+    CHECK(ac.entryMap[kGeneratedAnonymousFunctionEntryName].kind == Luau::AutocompleteEntryKind::GeneratedFunction);
+    CHECK(ac.entryMap[kGeneratedAnonymousFunctionEntryName].typeCorrect == Luau::TypeCorrectKind::Correct);
+    REQUIRE(ac.entryMap[kGeneratedAnonymousFunctionEntryName].insertText);
+    CHECK_EQ(EXPECTED_INSERT, *ac.entryMap[kGeneratedAnonymousFunctionEntryName].insertText);
+}
+
+TEST_CASE_FIXTURE(ACFixture, "anonymous_autofilled__noargs_multi_return")
+{
+    ScopedFastFlag flag{"LuauAnonymousAutofilled1", true};
+
+    check(R"(
+local function foo(a: () -> (string, number))
+    a()
+end
+
+foo(@1)
+    )");
+
+    const std::optional<std::string> EXPECTED_INSERT = "function(): (string, number)  end";
+
+    auto ac = autocomplete('1');
+
+    REQUIRE(ac.entryMap.count(kGeneratedAnonymousFunctionEntryName) == 1);
+    CHECK(ac.entryMap[kGeneratedAnonymousFunctionEntryName].kind == Luau::AutocompleteEntryKind::GeneratedFunction);
+    CHECK(ac.entryMap[kGeneratedAnonymousFunctionEntryName].typeCorrect == Luau::TypeCorrectKind::Correct);
+    REQUIRE(ac.entryMap[kGeneratedAnonymousFunctionEntryName].insertText);
+    CHECK_EQ(EXPECTED_INSERT, *ac.entryMap[kGeneratedAnonymousFunctionEntryName].insertText);
+}
+
+TEST_CASE_FIXTURE(ACFixture, "anonymous_autofilled__varargs_multi_return")
+{
+    ScopedFastFlag flag{"LuauAnonymousAutofilled1", true};
+
+    check(R"(
+local function foo(a: (...number) -> (string, number))
+    a()
+end
+
+foo(@1)
+    )");
+
+    const std::optional<std::string> EXPECTED_INSERT = "function(...: number): (string, number)  end";
+
+    auto ac = autocomplete('1');
+
+    REQUIRE(ac.entryMap.count(kGeneratedAnonymousFunctionEntryName) == 1);
+    CHECK(ac.entryMap[kGeneratedAnonymousFunctionEntryName].kind == Luau::AutocompleteEntryKind::GeneratedFunction);
+    CHECK(ac.entryMap[kGeneratedAnonymousFunctionEntryName].typeCorrect == Luau::TypeCorrectKind::Correct);
+    REQUIRE(ac.entryMap[kGeneratedAnonymousFunctionEntryName].insertText);
+    CHECK_EQ(EXPECTED_INSERT, *ac.entryMap[kGeneratedAnonymousFunctionEntryName].insertText);
+}
+
+TEST_CASE_FIXTURE(ACFixture, "anonymous_autofilled_multi_varargs_multi_return")
+{
+    ScopedFastFlag flag{"LuauAnonymousAutofilled1", true};
+
+    check(R"(
+local function foo(a: (string, ...number) -> (string, number))
+    a()
+end
+
+foo(@1)
+    )");
+
+    const std::optional<std::string> EXPECTED_INSERT = "function(a0: string, ...: number): (string, number)  end";
+
+    auto ac = autocomplete('1');
+
+    REQUIRE(ac.entryMap.count(kGeneratedAnonymousFunctionEntryName) == 1);
+    CHECK(ac.entryMap[kGeneratedAnonymousFunctionEntryName].kind == Luau::AutocompleteEntryKind::GeneratedFunction);
+    CHECK(ac.entryMap[kGeneratedAnonymousFunctionEntryName].typeCorrect == Luau::TypeCorrectKind::Correct);
+    REQUIRE(ac.entryMap[kGeneratedAnonymousFunctionEntryName].insertText);
+    CHECK_EQ(EXPECTED_INSERT, *ac.entryMap[kGeneratedAnonymousFunctionEntryName].insertText);
+}
+
+TEST_CASE_FIXTURE(ACFixture, "anonymous_autofilled_multi_varargs_varargs_return")
+{
+    ScopedFastFlag flag{"LuauAnonymousAutofilled1", true};
+
+    check(R"(
+local function foo(a: (string, ...number) -> ...number)
+    a()
+end
+
+foo(@1)
+    )");
+
+    const std::optional<std::string> EXPECTED_INSERT = "function(a0: string, ...: number): ...number  end";
+
+    auto ac = autocomplete('1');
+
+    REQUIRE(ac.entryMap.count(kGeneratedAnonymousFunctionEntryName) == 1);
+    CHECK(ac.entryMap[kGeneratedAnonymousFunctionEntryName].kind == Luau::AutocompleteEntryKind::GeneratedFunction);
+    CHECK(ac.entryMap[kGeneratedAnonymousFunctionEntryName].typeCorrect == Luau::TypeCorrectKind::Correct);
+    REQUIRE(ac.entryMap[kGeneratedAnonymousFunctionEntryName].insertText);
+    CHECK_EQ(EXPECTED_INSERT, *ac.entryMap[kGeneratedAnonymousFunctionEntryName].insertText);
+}
+
+TEST_CASE_FIXTURE(ACFixture, "anonymous_autofilled_multi_varargs_multi_varargs_return")
+{
+    ScopedFastFlag flag{"LuauAnonymousAutofilled1", true};
+
+    check(R"(
+local function foo(a: (string, ...number) -> (boolean, ...number))
+    a()
+end
+
+foo(@1)
+    )");
+
+    const std::optional<std::string> EXPECTED_INSERT = "function(a0: string, ...: number): (boolean, ...number)  end";
+
+    auto ac = autocomplete('1');
+
+    REQUIRE(ac.entryMap.count(kGeneratedAnonymousFunctionEntryName) == 1);
+    CHECK(ac.entryMap[kGeneratedAnonymousFunctionEntryName].kind == Luau::AutocompleteEntryKind::GeneratedFunction);
+    CHECK(ac.entryMap[kGeneratedAnonymousFunctionEntryName].typeCorrect == Luau::TypeCorrectKind::Correct);
+    REQUIRE(ac.entryMap[kGeneratedAnonymousFunctionEntryName].insertText);
+    CHECK_EQ(EXPECTED_INSERT, *ac.entryMap[kGeneratedAnonymousFunctionEntryName].insertText);
+}
+
+TEST_CASE_FIXTURE(ACFixture, "anonymous_autofilled_named_args")
+{
+    ScopedFastFlag flag{"LuauAnonymousAutofilled1", true};
+
+    check(R"(
+local function foo(a: (foo: number, bar: string) -> (string, number))
+    a()
+end
+
+foo(@1)
+    )");
+
+    const std::optional<std::string> EXPECTED_INSERT = "function(foo: number, bar: string): (string, number)  end";
+
+    auto ac = autocomplete('1');
+
+    REQUIRE(ac.entryMap.count(kGeneratedAnonymousFunctionEntryName) == 1);
+    CHECK(ac.entryMap[kGeneratedAnonymousFunctionEntryName].kind == Luau::AutocompleteEntryKind::GeneratedFunction);
+    CHECK(ac.entryMap[kGeneratedAnonymousFunctionEntryName].typeCorrect == Luau::TypeCorrectKind::Correct);
+    REQUIRE(ac.entryMap[kGeneratedAnonymousFunctionEntryName].insertText);
+    CHECK_EQ(EXPECTED_INSERT, *ac.entryMap[kGeneratedAnonymousFunctionEntryName].insertText);
+}
+
+TEST_CASE_FIXTURE(ACFixture, "anonymous_autofilled_partially_args")
+{
+    ScopedFastFlag flag{"LuauAnonymousAutofilled1", true};
+
+    check(R"(
+local function foo(a: (number, bar: string) -> (string, number))
+    a()
+end
+
+foo(@1)
+    )");
+
+    const std::optional<std::string> EXPECTED_INSERT = "function(a0: number, bar: string): (string, number)  end";
+
+    auto ac = autocomplete('1');
+
+    REQUIRE(ac.entryMap.count(kGeneratedAnonymousFunctionEntryName) == 1);
+    CHECK(ac.entryMap[kGeneratedAnonymousFunctionEntryName].kind == Luau::AutocompleteEntryKind::GeneratedFunction);
+    CHECK(ac.entryMap[kGeneratedAnonymousFunctionEntryName].typeCorrect == Luau::TypeCorrectKind::Correct);
+    REQUIRE(ac.entryMap[kGeneratedAnonymousFunctionEntryName].insertText);
+    CHECK_EQ(EXPECTED_INSERT, *ac.entryMap[kGeneratedAnonymousFunctionEntryName].insertText);
+}
+
+TEST_CASE_FIXTURE(ACFixture, "anonymous_autofilled_partially_args_last")
+{
+    ScopedFastFlag flag{"LuauAnonymousAutofilled1", true};
+
+    check(R"(
+local function foo(a: (foo: number, string) -> (string, number))
+    a()
+end
+
+foo(@1)
+    )");
+
+    const std::optional<std::string> EXPECTED_INSERT = "function(foo: number, a1: string): (string, number)  end";
+
+    auto ac = autocomplete('1');
+
+    REQUIRE(ac.entryMap.count(kGeneratedAnonymousFunctionEntryName) == 1);
+    CHECK(ac.entryMap[kGeneratedAnonymousFunctionEntryName].kind == Luau::AutocompleteEntryKind::GeneratedFunction);
+    CHECK(ac.entryMap[kGeneratedAnonymousFunctionEntryName].typeCorrect == Luau::TypeCorrectKind::Correct);
+    REQUIRE(ac.entryMap[kGeneratedAnonymousFunctionEntryName].insertText);
+    CHECK_EQ(EXPECTED_INSERT, *ac.entryMap[kGeneratedAnonymousFunctionEntryName].insertText);
+}
+
+TEST_CASE_FIXTURE(ACFixture, "anonymous_autofilled_typeof_args")
+{
+    ScopedFastFlag flag{"LuauAnonymousAutofilled1", true};
+
+    check(R"(
+local t = { a = 1, b = 2 }
+
+local function foo(a: (foo: typeof(t)) -> ())
+    a()
+end
+
+foo(@1)
+    )");
+
+    const std::optional<std::string> EXPECTED_INSERT = "function(foo)  end"; // Cannot utter this type.
+
+    auto ac = autocomplete('1');
+
+    REQUIRE(ac.entryMap.count(kGeneratedAnonymousFunctionEntryName) == 1);
+    CHECK(ac.entryMap[kGeneratedAnonymousFunctionEntryName].kind == Luau::AutocompleteEntryKind::GeneratedFunction);
+    CHECK(ac.entryMap[kGeneratedAnonymousFunctionEntryName].typeCorrect == Luau::TypeCorrectKind::Correct);
+    REQUIRE(ac.entryMap[kGeneratedAnonymousFunctionEntryName].insertText);
+    CHECK_EQ(EXPECTED_INSERT, *ac.entryMap[kGeneratedAnonymousFunctionEntryName].insertText);
+}
+
+TEST_CASE_FIXTURE(ACFixture, "anonymous_autofilled_table_literal_args")
+{
+    ScopedFastFlag flag{"LuauAnonymousAutofilled1", true};
+
+    check(R"(
+local function foo(a: (tbl: { x: number, y: number }) -> number) return a({x=2, y = 3}) end
+foo(@1)
+    )");
+
+    const std::optional<std::string> EXPECTED_INSERT = "function(tbl: { x: number, y: number }): number  end";
+
+    auto ac = autocomplete('1');
+
+    REQUIRE(ac.entryMap.count(kGeneratedAnonymousFunctionEntryName) == 1);
+    CHECK(ac.entryMap[kGeneratedAnonymousFunctionEntryName].kind == Luau::AutocompleteEntryKind::GeneratedFunction);
+    CHECK(ac.entryMap[kGeneratedAnonymousFunctionEntryName].typeCorrect == Luau::TypeCorrectKind::Correct);
+    REQUIRE(ac.entryMap[kGeneratedAnonymousFunctionEntryName].insertText);
+    CHECK_EQ(EXPECTED_INSERT, *ac.entryMap[kGeneratedAnonymousFunctionEntryName].insertText);
+}
+
+TEST_CASE_FIXTURE(ACFixture, "anonymous_autofilled_typeof_returns")
+{
+    ScopedFastFlag flag{"LuauAnonymousAutofilled1", true};
+
+    check(R"(
+local t = { a = 1, b = 2 }
+
+local function foo(a: () -> typeof(t))
+    a()
+end
+
+foo(@1)
+    )");
+
+    const std::optional<std::string> EXPECTED_INSERT = "function()  end"; // Cannot utter this type.
+
+    auto ac = autocomplete('1');
+
+    REQUIRE(ac.entryMap.count(kGeneratedAnonymousFunctionEntryName) == 1);
+    CHECK(ac.entryMap[kGeneratedAnonymousFunctionEntryName].kind == Luau::AutocompleteEntryKind::GeneratedFunction);
+    CHECK(ac.entryMap[kGeneratedAnonymousFunctionEntryName].typeCorrect == Luau::TypeCorrectKind::Correct);
+    REQUIRE(ac.entryMap[kGeneratedAnonymousFunctionEntryName].insertText);
+    CHECK_EQ(EXPECTED_INSERT, *ac.entryMap[kGeneratedAnonymousFunctionEntryName].insertText);
+}
+
+TEST_CASE_FIXTURE(ACFixture, "anonymous_autofilled_table_literal_args")
+{
+    ScopedFastFlag flag{"LuauAnonymousAutofilled1", true};
+
+    check(R"(
+local function foo(a: () -> { x: number, y: number }) return {x=2, y = 3} end
+foo(@1)
+    )");
+
+    const std::optional<std::string> EXPECTED_INSERT = "function(): { x: number, y: number }  end";
+
+    auto ac = autocomplete('1');
+
+    REQUIRE(ac.entryMap.count(kGeneratedAnonymousFunctionEntryName) == 1);
+    CHECK(ac.entryMap[kGeneratedAnonymousFunctionEntryName].kind == Luau::AutocompleteEntryKind::GeneratedFunction);
+    CHECK(ac.entryMap[kGeneratedAnonymousFunctionEntryName].typeCorrect == Luau::TypeCorrectKind::Correct);
+    REQUIRE(ac.entryMap[kGeneratedAnonymousFunctionEntryName].insertText);
+    CHECK_EQ(EXPECTED_INSERT, *ac.entryMap[kGeneratedAnonymousFunctionEntryName].insertText);
+}
+
+TEST_CASE_FIXTURE(ACFixture, "anonymous_autofilled_typeof_vararg")
+{
+    ScopedFastFlag flag{"LuauAnonymousAutofilled1", true};
+
+    check(R"(
+local t = { a = 1, b = 2 }
+
+local function foo(a: (...typeof(t)) -> ())
+    a()
+end
+
+foo(@1)
+    )");
+
+    const std::optional<std::string> EXPECTED_INSERT = "function(...)  end"; // Cannot utter this type.
+
+    auto ac = autocomplete('1');
+
+    REQUIRE(ac.entryMap.count(kGeneratedAnonymousFunctionEntryName) == 1);
+    CHECK(ac.entryMap[kGeneratedAnonymousFunctionEntryName].kind == Luau::AutocompleteEntryKind::GeneratedFunction);
+    CHECK(ac.entryMap[kGeneratedAnonymousFunctionEntryName].typeCorrect == Luau::TypeCorrectKind::Correct);
+    REQUIRE(ac.entryMap[kGeneratedAnonymousFunctionEntryName].insertText);
+    CHECK_EQ(EXPECTED_INSERT, *ac.entryMap[kGeneratedAnonymousFunctionEntryName].insertText);
+}
+
+TEST_CASE_FIXTURE(ACFixture, "anonymous_autofilled_generic_type_pack_vararg")
+{
+    ScopedFastFlag flag{"LuauAnonymousAutofilled1", true};
+
+    check(R"(
+local function foo<A>(a: (...A) -> number, ...: A)
+	return a(...)
+end
+
+foo(@1)
+    )");
+
+    const std::optional<std::string> EXPECTED_INSERT = "function(...): number  end";
+
+    auto ac = autocomplete('1');
+
+    REQUIRE(ac.entryMap.count(kGeneratedAnonymousFunctionEntryName) == 1);
+    CHECK(ac.entryMap[kGeneratedAnonymousFunctionEntryName].kind == Luau::AutocompleteEntryKind::GeneratedFunction);
+    CHECK(ac.entryMap[kGeneratedAnonymousFunctionEntryName].typeCorrect == Luau::TypeCorrectKind::Correct);
+    REQUIRE(ac.entryMap[kGeneratedAnonymousFunctionEntryName].insertText);
+    CHECK_EQ(EXPECTED_INSERT, *ac.entryMap[kGeneratedAnonymousFunctionEntryName].insertText);
+}
+
+TEST_CASE_FIXTURE(ACFixture, "anonymous_autofilled_generic_on_argument_type_pack_vararg")
+{
+    ScopedFastFlag flag{"LuauAnonymousAutofilled1", true};
+
+    check(R"(
+local function foo(a: <T...>(...: T...) -> number)
+	return a(4, 5, 6)
+end
+
+foo(@1)
+    )");
+
+    const std::optional<std::string> EXPECTED_INSERT = "function(...): number  end";
+
+    auto ac = autocomplete('1');
+
+    REQUIRE(ac.entryMap.count(kGeneratedAnonymousFunctionEntryName) == 1);
+    CHECK(ac.entryMap[kGeneratedAnonymousFunctionEntryName].kind == Luau::AutocompleteEntryKind::GeneratedFunction);
+    CHECK(ac.entryMap[kGeneratedAnonymousFunctionEntryName].typeCorrect == Luau::TypeCorrectKind::Correct);
+    REQUIRE(ac.entryMap[kGeneratedAnonymousFunctionEntryName].insertText);
+    CHECK_EQ(EXPECTED_INSERT, *ac.entryMap[kGeneratedAnonymousFunctionEntryName].insertText);
 }
 
 TEST_SUITE_END();

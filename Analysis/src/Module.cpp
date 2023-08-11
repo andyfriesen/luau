@@ -7,20 +7,14 @@
 #include "Luau/Normalize.h"
 #include "Luau/RecursionCounter.h"
 #include "Luau/Scope.h"
+#include "Luau/Type.h"
 #include "Luau/TypeInfer.h"
 #include "Luau/TypePack.h"
-#include "Luau/TypeVar.h"
-#include "Luau/VisitTypeVar.h"
+#include "Luau/VisitType.h"
 
 #include <algorithm>
 
-LUAU_FASTFLAG(LuauLowerBoundsCalculation);
 LUAU_FASTFLAG(DebugLuauDeferredConstraintResolution);
-LUAU_FASTFLAGVARIABLE(LuauForceExportSurfacesToBeNormal, false);
-LUAU_FASTFLAGVARIABLE(LuauClonePublicInterfaceLess, false);
-LUAU_FASTFLAG(LuauSubstitutionReentrant);
-LUAU_FASTFLAG(LuauClassTypeVarsInSubstitution);
-LUAU_FASTFLAG(LuauSubstitutionFixMissingFields);
 
 namespace Luau
 {
@@ -38,14 +32,14 @@ static bool contains(Position pos, Comment comment)
         return false;
 }
 
-bool isWithinComment(const SourceModule& sourceModule, Position pos)
+static bool isWithinComment(const std::vector<Comment>& commentLocations, Position pos)
 {
-    auto iter = std::lower_bound(sourceModule.commentLocations.begin(), sourceModule.commentLocations.end(),
-        Comment{Lexeme::Comment, Location{pos, pos}}, [](const Comment& a, const Comment& b) {
+    auto iter = std::lower_bound(
+        commentLocations.begin(), commentLocations.end(), Comment{Lexeme::Comment, Location{pos, pos}}, [](const Comment& a, const Comment& b) {
             return a.location.end < b.location.end;
         });
 
-    if (iter == sourceModule.commentLocations.end())
+    if (iter == commentLocations.end())
         return false;
 
     if (contains(pos, *iter))
@@ -54,50 +48,30 @@ bool isWithinComment(const SourceModule& sourceModule, Position pos)
     // Due to the nature of std::lower_bound, it is possible that iter points at a comment that ends
     // at pos.  We'll try the next comment, if it exists.
     ++iter;
-    if (iter == sourceModule.commentLocations.end())
+    if (iter == commentLocations.end())
         return false;
 
     return contains(pos, *iter);
 }
 
-struct ForceNormal : TypeVarOnceVisitor
+bool isWithinComment(const SourceModule& sourceModule, Position pos)
 {
-    const TypeArena* typeArena = nullptr;
+    return isWithinComment(sourceModule.commentLocations, pos);
+}
 
-    ForceNormal(const TypeArena* typeArena)
-        : typeArena(typeArena)
-    {
-    }
-
-    bool visit(TypeId ty) override
-    {
-        if (ty->owningArena != typeArena)
-            return false;
-
-        asMutable(ty)->normal = true;
-        return true;
-    }
-
-    bool visit(TypeId ty, const FreeTypeVar& ftv) override
-    {
-        visit(ty);
-        return true;
-    }
-
-    bool visit(TypePackId tp, const FreeTypePack& ftp) override
-    {
-        return true;
-    }
-};
+bool isWithinComment(const ParseResult& result, Position pos)
+{
+    return isWithinComment(result.commentLocations, pos);
+}
 
 struct ClonePublicInterface : Substitution
 {
-    NotNull<SingletonTypes> singletonTypes;
+    NotNull<BuiltinTypes> builtinTypes;
     NotNull<Module> module;
 
-    ClonePublicInterface(const TxnLog* log, NotNull<SingletonTypes> singletonTypes, Module* module)
+    ClonePublicInterface(const TxnLog* log, NotNull<BuiltinTypes> builtinTypes, Module* module)
         : Substitution(log, &module->interfaceTypes)
-        , singletonTypes(singletonTypes)
+        , builtinTypes(builtinTypes)
         , module(module)
     {
         LUAU_ASSERT(module);
@@ -108,9 +82,9 @@ struct ClonePublicInterface : Substitution
         if (ty->owningArena == &module->internalTypes)
             return true;
 
-        if (const FunctionTypeVar* ftv = get<FunctionTypeVar>(ty))
+        if (const FunctionType* ftv = get<FunctionType>(ty))
             return ftv->level.level != 0;
-        if (const TableTypeVar* ttv = get<TableTypeVar>(ty))
+        if (const TableType* ttv = get<TableType>(ty))
             return ttv->level.level != 0;
         return false;
     }
@@ -120,13 +94,29 @@ struct ClonePublicInterface : Substitution
         return tp->owningArena == &module->internalTypes;
     }
 
+    bool ignoreChildrenVisit(TypeId ty) override
+    {
+        if (ty->owningArena != &module->internalTypes)
+            return true;
+
+        return false;
+    }
+
+    bool ignoreChildrenVisit(TypePackId tp) override
+    {
+        if (tp->owningArena != &module->internalTypes)
+            return true;
+
+        return false;
+    }
+
     TypeId clean(TypeId ty) override
     {
         TypeId result = clone(ty);
 
-        if (FunctionTypeVar* ftv = getMutable<FunctionTypeVar>(result))
+        if (FunctionType* ftv = getMutable<FunctionType>(result))
             ftv->level = TypeLevel{0, 0};
-        else if (TableTypeVar* ttv = getMutable<TableTypeVar>(result))
+        else if (TableType* ttv = getMutable<TableType>(result))
             ttv->level = TypeLevel{0, 0};
 
         return result;
@@ -139,8 +129,6 @@ struct ClonePublicInterface : Substitution
 
     TypeId cloneType(TypeId ty)
     {
-        LUAU_ASSERT(FFlag::LuauSubstitutionReentrant && FFlag::LuauSubstitutionFixMissingFields);
-
         std::optional<TypeId> result = substitute(ty);
         if (result)
         {
@@ -149,14 +137,12 @@ struct ClonePublicInterface : Substitution
         else
         {
             module->errors.push_back(TypeError{module->scopes[0].first, UnificationTooComplex{}});
-            return singletonTypes->errorRecoveryType();
+            return builtinTypes->errorRecoveryType();
         }
     }
 
     TypePackId cloneTypePack(TypePackId tp)
     {
-        LUAU_ASSERT(FFlag::LuauSubstitutionReentrant && FFlag::LuauSubstitutionFixMissingFields);
-
         std::optional<TypePackId> result = substitute(tp);
         if (result)
         {
@@ -165,14 +151,12 @@ struct ClonePublicInterface : Substitution
         else
         {
             module->errors.push_back(TypeError{module->scopes[0].first, UnificationTooComplex{}});
-            return singletonTypes->errorRecoveryTypePack();
+            return builtinTypes->errorRecoveryTypePack();
         }
     }
 
     TypeFun cloneTypeFun(const TypeFun& tf)
     {
-        LUAU_ASSERT(FFlag::LuauSubstitutionReentrant && FFlag::LuauSubstitutionFixMissingFields);
-
         std::vector<GenericTypeDefinition> typeParams;
         std::vector<GenericTypePackDefinition> typePackParams;
 
@@ -210,113 +194,53 @@ Module::~Module()
     unfreeze(internalTypes);
 }
 
-void Module::clonePublicInterface(NotNull<SingletonTypes> singletonTypes, InternalErrorReporter& ice)
+void Module::clonePublicInterface(NotNull<BuiltinTypes> builtinTypes, InternalErrorReporter& ice)
 {
-    LUAU_ASSERT(interfaceTypes.typeVars.empty());
+    LUAU_ASSERT(interfaceTypes.types.empty());
     LUAU_ASSERT(interfaceTypes.typePacks.empty());
 
-    CloneState cloneState;
+    CloneState cloneState{builtinTypes};
 
     ScopePtr moduleScope = getModuleScope();
 
     TypePackId returnType = moduleScope->returnType;
     std::optional<TypePackId> varargPack = FFlag::DebugLuauDeferredConstraintResolution ? std::nullopt : moduleScope->varargPack;
-    std::unordered_map<Name, TypeFun>* exportedTypeBindings = &moduleScope->exportedTypeBindings;
 
     TxnLog log;
-    ClonePublicInterface clonePublicInterface{&log, singletonTypes, this};
+    ClonePublicInterface clonePublicInterface{&log, builtinTypes, this};
 
-    if (FFlag::LuauClonePublicInterfaceLess)
-        returnType = clonePublicInterface.cloneTypePack(returnType);
-    else
-        returnType = clone(returnType, interfaceTypes, cloneState);
+    returnType = clonePublicInterface.cloneTypePack(returnType);
 
     moduleScope->returnType = returnType;
     if (varargPack)
     {
-        if (FFlag::LuauClonePublicInterfaceLess)
-            varargPack = clonePublicInterface.cloneTypePack(*varargPack);
-        else
-            varargPack = clone(*varargPack, interfaceTypes, cloneState);
+        varargPack = clonePublicInterface.cloneTypePack(*varargPack);
         moduleScope->varargPack = varargPack;
     }
 
-    ForceNormal forceNormal{&interfaceTypes};
-
-    if (FFlag::LuauLowerBoundsCalculation)
+    for (auto& [name, tf] : moduleScope->exportedTypeBindings)
     {
-        normalize(returnType, NotNull{this}, singletonTypes, ice);
-        if (FFlag::LuauForceExportSurfacesToBeNormal)
-            forceNormal.traverse(returnType);
-        if (varargPack)
-        {
-            normalize(*varargPack, NotNull{this}, singletonTypes, ice);
-            if (FFlag::LuauForceExportSurfacesToBeNormal)
-                forceNormal.traverse(*varargPack);
-        }
-    }
-
-    if (exportedTypeBindings)
-    {
-        for (auto& [name, tf] : *exportedTypeBindings)
-        {
-            if (FFlag::LuauClonePublicInterfaceLess)
-                tf = clonePublicInterface.cloneTypeFun(tf);
-            else
-                tf = clone(tf, interfaceTypes, cloneState);
-            if (FFlag::LuauLowerBoundsCalculation)
-            {
-                normalize(tf.type, NotNull{this}, singletonTypes, ice);
-
-                // We're about to freeze the memory.  We know that the flag is conservative by design.  Cyclic tables
-                // won't be marked normal.  If the types aren't normal by now, they never will be.
-                forceNormal.traverse(tf.type);
-                for (GenericTypeDefinition param : tf.typeParams)
-                {
-                    forceNormal.traverse(param.ty);
-
-                    if (param.defaultValue)
-                    {
-                        normalize(*param.defaultValue, NotNull{this}, singletonTypes, ice);
-                        forceNormal.traverse(*param.defaultValue);
-                    }
-                }
-            }
-        }
-    }
-
-    for (TypeId ty : returnType)
-    {
-        if (get<GenericTypeVar>(follow(ty)))
-        {
-            auto t = asMutable(ty);
-            t->ty = AnyTypeVar{};
-            t->normal = true;
-        }
+        tf = clonePublicInterface.cloneTypeFun(tf);
     }
 
     for (auto& [name, ty] : declaredGlobals)
     {
-        if (FFlag::LuauClonePublicInterfaceLess)
-            ty = clonePublicInterface.cloneType(ty);
-        else
-            ty = clone(ty, interfaceTypes, cloneState);
-        if (FFlag::LuauLowerBoundsCalculation)
-        {
-            normalize(ty, NotNull{this}, singletonTypes, ice);
-
-            if (FFlag::LuauForceExportSurfacesToBeNormal)
-                forceNormal.traverse(ty);
-        }
+        ty = clonePublicInterface.cloneType(ty);
     }
 
-    freeze(internalTypes);
-    freeze(interfaceTypes);
+    // Copy external stuff over to Module itself
+    this->returnType = moduleScope->returnType;
+    this->exportedTypeBindings = moduleScope->exportedTypeBindings;
+}
+
+bool Module::hasModuleScope() const
+{
+    return !scopes.empty();
 }
 
 ScopePtr Module::getModuleScope() const
 {
-    LUAU_ASSERT(!scopes.empty());
+    LUAU_ASSERT(hasModuleScope());
     return scopes.front().second;
 }
 

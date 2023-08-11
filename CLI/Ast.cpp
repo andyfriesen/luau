@@ -6,6 +6,7 @@
 #include "Luau/AstJsonEncoder.h"
 #include "Luau/Parser.h"
 #include "Luau/ParseOptions.h"
+#include "Luau/ToString.h"
 
 #include "FileUtils.h"
 
@@ -63,8 +64,6 @@ int main(int argc, char** argv)
 
     Luau::ParseOptions options;
     options.captureComments = true;
-    options.supportContinueStatement = true;
-    options.allowTypeAnnotations = true;
     options.allowDeclarationSyntax = true;
 
     Luau::ParseResult parseResult = Luau::Parser::parse(source.data(), source.size(), names, allocator, options);

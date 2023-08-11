@@ -2,7 +2,7 @@
 #pragma once
 
 #include "Luau/Location.h"
-#include "Luau/TypeVar.h"
+#include "Luau/Type.h"
 
 #include <unordered_map>
 #include <string>
@@ -38,6 +38,7 @@ enum class AutocompleteEntryKind
     String,
     Type,
     Module,
+    GeneratedFunction,
 };
 
 enum class ParenthesesRecommendation
@@ -65,11 +66,15 @@ struct AutocompleteEntry
     // Set if this suggestion matches the type expected in the context
     TypeCorrectKind typeCorrect = TypeCorrectKind::None;
 
-    std::optional<const ClassTypeVar*> containingClass = std::nullopt;
+    std::optional<const ClassType*> containingClass = std::nullopt;
     std::optional<const Property*> prop = std::nullopt;
     std::optional<std::string> documentationSymbol = std::nullopt;
     Tags tags;
     ParenthesesRecommendation parens = ParenthesesRecommendation::None;
+    std::optional<std::string> insertText;
+
+    // Only meaningful if kind is Property.
+    bool indexedWithSelf = false;
 };
 
 using AutocompleteEntryMap = std::unordered_map<std::string, AutocompleteEntry>;
@@ -89,8 +94,11 @@ struct AutocompleteResult
 };
 
 using ModuleName = std::string;
-using StringCompletionCallback = std::function<std::optional<AutocompleteEntryMap>(std::string tag, std::optional<const ClassTypeVar*> ctx)>;
+using StringCompletionCallback =
+    std::function<std::optional<AutocompleteEntryMap>(std::string tag, std::optional<const ClassType*> ctx, std::optional<std::string> contents)>;
 
 AutocompleteResult autocomplete(Frontend& frontend, const ModuleName& moduleName, Position position, StringCompletionCallback callback);
+
+constexpr char kGeneratedAnonymousFunctionEntryName[] = "function (anonymous autofilled)";
 
 } // namespace Luau

@@ -15,6 +15,16 @@
 #include <intrin.h>
 #endif
 
+#ifdef LUAU_TARGET_SSE41
+#include <smmintrin.h>
+
+#ifndef _MSC_VER
+#include <cpuid.h> // on MSVC this comes from intrin.h
+#endif
+#endif
+
+LUAU_DYNAMIC_FASTFLAGVARIABLE(LuauFastcallGC, false)
+
 // luauF functions implement FASTCALL instruction that performs a direct execution of some builtin functions from the VM
 // The rule of thumb is that FASTCALL functions can not call user code, yield, fail, or reallocate stack.
 // If types of the arguments mismatch, luauF_* needs to return -1 and the execution will fall back to the usual call path
@@ -263,11 +273,14 @@ static int luauF_log(lua_State* L, StkId res, TValue* arg0, int nresults, StkId 
 
 static int luauF_max(lua_State* L, StkId res, TValue* arg0, int nresults, StkId args, int nparams)
 {
-    if (nparams >= 1 && nresults <= 1 && ttisnumber(arg0))
+    if (nparams >= 2 && nresults <= 1 && ttisnumber(arg0) && ttisnumber(args))
     {
-        double r = nvalue(arg0);
+        double a1 = nvalue(arg0);
+        double a2 = nvalue(args);
 
-        for (int i = 2; i <= nparams; ++i)
+        double r = (a2 > a1) ? a2 : a1;
+
+        for (int i = 3; i <= nparams; ++i)
         {
             if (!ttisnumber(args + (i - 2)))
                 return -1;
@@ -286,11 +299,14 @@ static int luauF_max(lua_State* L, StkId res, TValue* arg0, int nresults, StkId 
 
 static int luauF_min(lua_State* L, StkId res, TValue* arg0, int nresults, StkId args, int nparams)
 {
-    if (nparams >= 1 && nresults <= 1 && ttisnumber(arg0))
+    if (nparams >= 2 && nresults <= 1 && ttisnumber(arg0) && ttisnumber(args))
     {
-        double r = nvalue(arg0);
+        double a1 = nvalue(arg0);
+        double a2 = nvalue(args);
 
-        for (int i = 2; i <= nparams; ++i)
+        double r = (a2 < a1) ? a2 : a1;
+
+        for (int i = 3; i <= nparams; ++i)
         {
             if (!ttisnumber(args + (i - 2)))
                 return -1;
@@ -439,22 +455,18 @@ static int luauF_arshift(lua_State* L, StkId res, TValue* arg0, int nresults, St
 
 static int luauF_band(lua_State* L, StkId res, TValue* arg0, int nresults, StkId args, int nparams)
 {
-    if (nparams >= 1 && nresults <= 1)
+    if (nparams >= 2 && nresults <= 1 && ttisnumber(arg0) && ttisnumber(args))
     {
-        uint32_t r = ~0u;
+        double a1 = nvalue(arg0);
+        double a2 = nvalue(args);
 
-        if (!ttisnumber(arg0))
-            return -1;
+        unsigned u1, u2;
+        luai_num2unsigned(u1, a1);
+        luai_num2unsigned(u2, a2);
 
-        {
-            double a1 = nvalue(arg0);
-            unsigned u;
-            luai_num2unsigned(u, a1);
+        uint32_t r = u1 & u2;
 
-            r &= u;
-        }
-
-        for (int i = 2; i <= nparams; ++i)
+        for (int i = 3; i <= nparams; ++i)
         {
             if (!ttisnumber(args + (i - 2)))
                 return -1;
@@ -492,22 +504,18 @@ static int luauF_bnot(lua_State* L, StkId res, TValue* arg0, int nresults, StkId
 
 static int luauF_bor(lua_State* L, StkId res, TValue* arg0, int nresults, StkId args, int nparams)
 {
-    if (nparams >= 1 && nresults <= 1)
+    if (nparams >= 2 && nresults <= 1 && ttisnumber(arg0) && ttisnumber(args))
     {
-        uint32_t r = 0;
+        double a1 = nvalue(arg0);
+        double a2 = nvalue(args);
 
-        if (!ttisnumber(arg0))
-            return -1;
+        unsigned u1, u2;
+        luai_num2unsigned(u1, a1);
+        luai_num2unsigned(u2, a2);
 
-        {
-            double a1 = nvalue(arg0);
-            unsigned u;
-            luai_num2unsigned(u, a1);
+        uint32_t r = u1 | u2;
 
-            r |= u;
-        }
-
-        for (int i = 2; i <= nparams; ++i)
+        for (int i = 3; i <= nparams; ++i)
         {
             if (!ttisnumber(args + (i - 2)))
                 return -1;
@@ -528,22 +536,18 @@ static int luauF_bor(lua_State* L, StkId res, TValue* arg0, int nresults, StkId 
 
 static int luauF_bxor(lua_State* L, StkId res, TValue* arg0, int nresults, StkId args, int nparams)
 {
-    if (nparams >= 1 && nresults <= 1)
+    if (nparams >= 2 && nresults <= 1 && ttisnumber(arg0) && ttisnumber(args))
     {
-        uint32_t r = 0;
+        double a1 = nvalue(arg0);
+        double a2 = nvalue(args);
 
-        if (!ttisnumber(arg0))
-            return -1;
+        unsigned u1, u2;
+        luai_num2unsigned(u1, a1);
+        luai_num2unsigned(u2, a2);
 
-        {
-            double a1 = nvalue(arg0);
-            unsigned u;
-            luai_num2unsigned(u, a1);
+        uint32_t r = u1 ^ u2;
 
-            r ^= u;
-        }
-
-        for (int i = 2; i <= nparams; ++i)
+        for (int i = 3; i <= nparams; ++i)
         {
             if (!ttisnumber(args + (i - 2)))
                 return -1;
@@ -564,22 +568,18 @@ static int luauF_bxor(lua_State* L, StkId res, TValue* arg0, int nresults, StkId
 
 static int luauF_btest(lua_State* L, StkId res, TValue* arg0, int nresults, StkId args, int nparams)
 {
-    if (nparams >= 1 && nresults <= 1)
+    if (nparams >= 2 && nresults <= 1 && ttisnumber(arg0) && ttisnumber(args))
     {
-        uint32_t r = ~0u;
+        double a1 = nvalue(arg0);
+        double a2 = nvalue(args);
 
-        if (!ttisnumber(arg0))
-            return -1;
+        unsigned u1, u2;
+        luai_num2unsigned(u1, a1);
+        luai_num2unsigned(u2, a2);
 
-        {
-            double a1 = nvalue(arg0);
-            unsigned u;
-            luai_num2unsigned(u, a1);
+        uint32_t r = u1 & u2;
 
-            r &= u;
-        }
-
-        for (int i = 2; i <= nparams; ++i)
+        for (int i = 3; i <= nparams; ++i)
         {
             if (!ttisnumber(args + (i - 2)))
                 return -1;
@@ -789,7 +789,7 @@ static int luauF_type(lua_State* L, StkId res, TValue* arg0, int nresults, StkId
         int tt = ttype(arg0);
         TString* ttname = L->global->ttname[tt];
 
-        setsvalue2s(L, res, ttname);
+        setsvalue(L, res, ttname);
         return 1;
     }
 
@@ -832,6 +832,8 @@ static int luauF_char(lua_State* L, StkId res, TValue* arg0, int nresults, StkId
 
     if (nparams < int(sizeof(buffer)) && nresults <= 1)
     {
+        if (DFFlag::LuauFastcallGC && luaC_needsGC(L))
+            return -1; // we can't call luaC_checkGC so fall back to C implementation
 
         if (nparams >= 1)
         {
@@ -861,7 +863,7 @@ static int luauF_char(lua_State* L, StkId res, TValue* arg0, int nresults, StkId
 
         buffer[nparams] = 0;
 
-        setsvalue2s(L, res, luaS_newlstr(L, buffer, nparams));
+        setsvalue(L, res, luaS_newlstr(L, buffer, nparams));
         return 1;
     }
 
@@ -887,7 +889,7 @@ static int luauF_typeof(lua_State* L, StkId res, TValue* arg0, int nresults, Stk
     {
         const TString* ttname = luaT_objtypenamestr(L, arg0);
 
-        setsvalue2s(L, res, ttname);
+        setsvalue(L, res, ttname);
         return 1;
     }
 
@@ -902,9 +904,12 @@ static int luauF_sub(lua_State* L, StkId res, TValue* arg0, int nresults, StkId 
         int i = int(nvalue(args));
         int j = int(nvalue(args + 1));
 
+        if (DFFlag::LuauFastcallGC && luaC_needsGC(L))
+            return -1; // we can't call luaC_checkGC so fall back to C implementation
+
         if (i >= 1 && j >= i && unsigned(j - 1) < unsigned(ts->len))
         {
-            setsvalue2s(L, res, luaS_newlstr(L, getstr(ts) + (i - 1), j - i + 1));
+            setsvalue(L, res, luaS_newlstr(L, getstr(ts) + (i - 1), j - i + 1));
             return 1;
         }
     }
@@ -993,12 +998,13 @@ static int luauF_rawset(lua_State* L, StkId res, TValue* arg0, int nresults, Stk
         else if (ttisvector(key) && luai_vecisnan(vvalue(key)))
             return -1;
 
-        if (hvalue(arg0)->readonly)
+        Table* t = hvalue(arg0);
+        if (t->readonly)
             return -1;
 
         setobj2s(L, res, arg0);
-        setobj2t(L, luaH_set(L, hvalue(arg0), args), args + 1);
-        luaC_barriert(L, hvalue(arg0), args + 1);
+        setobj2t(L, luaH_set(L, t, args), args + 1);
+        luaC_barriert(L, t, args + 1);
         return 1;
     }
 
@@ -1009,12 +1015,13 @@ static int luauF_tinsert(lua_State* L, StkId res, TValue* arg0, int nresults, St
 {
     if (nparams == 2 && nresults <= 0 && ttistable(arg0))
     {
-        if (hvalue(arg0)->readonly)
+        Table* t = hvalue(arg0);
+        if (t->readonly)
             return -1;
 
-        int pos = luaH_getn(hvalue(arg0)) + 1;
-        setobj2t(L, luaH_setnum(L, hvalue(arg0), pos), args);
-        luaC_barriert(L, hvalue(arg0), args);
+        int pos = luaH_getn(t) + 1;
+        setobj2t(L, luaH_setnum(L, t, pos), args);
+        luaC_barriert(L, t, args);
         return 0;
     }
 
@@ -1193,7 +1200,196 @@ static int luauF_extractk(lua_State* L, StkId res, TValue* arg0, int nresults, S
     return -1;
 }
 
-luau_FastFunction luauF_table[256] = {
+static int luauF_getmetatable(lua_State* L, StkId res, TValue* arg0, int nresults, StkId args, int nparams)
+{
+    if (nparams >= 1 && nresults <= 1)
+    {
+        Table* mt = NULL;
+        if (ttistable(arg0))
+            mt = hvalue(arg0)->metatable;
+        else if (ttisuserdata(arg0))
+            mt = uvalue(arg0)->metatable;
+        else
+            mt = L->global->mt[ttype(arg0)];
+
+        const TValue* mtv = mt ? luaH_getstr(mt, L->global->tmname[TM_METATABLE]) : luaO_nilobject;
+        if (!ttisnil(mtv))
+        {
+            setobj2s(L, res, mtv);
+            return 1;
+        }
+
+        if (mt)
+        {
+            sethvalue(L, res, mt);
+            return 1;
+        }
+        else
+        {
+            setnilvalue(res);
+            return 1;
+        }
+    }
+
+    return -1;
+}
+
+static int luauF_setmetatable(lua_State* L, StkId res, TValue* arg0, int nresults, StkId args, int nparams)
+{
+    // note: setmetatable(_, nil) is rare so we use fallback for it to optimize the fast path
+    if (nparams >= 2 && nresults <= 1 && ttistable(arg0) && ttistable(args))
+    {
+        Table* t = hvalue(arg0);
+        if (t->readonly || t->metatable != NULL)
+            return -1; // note: overwriting non-null metatable is very rare but it requires __metatable check
+
+        Table* mt = hvalue(args);
+        t->metatable = mt;
+        luaC_objbarrier(L, t, mt);
+
+        sethvalue(L, res, t);
+        return 1;
+    }
+
+    return -1;
+}
+
+static int luauF_tonumber(lua_State* L, StkId res, TValue* arg0, int nresults, StkId args, int nparams)
+{
+    if (nparams == 1 && nresults <= 1)
+    {
+        double num;
+
+        if (ttisnumber(arg0))
+        {
+            setnvalue(res, nvalue(arg0));
+            return 1;
+        }
+        else if (ttisstring(arg0) && luaO_str2d(svalue(arg0), &num))
+        {
+            setnvalue(res, num);
+            return 1;
+        }
+        else
+        {
+            setnilvalue(res);
+            return 1;
+        }
+    }
+
+    return -1;
+}
+
+static int luauF_tostring(lua_State* L, StkId res, TValue* arg0, int nresults, StkId args, int nparams)
+{
+    if (nparams >= 1 && nresults <= 1)
+    {
+        switch (ttype(arg0))
+        {
+        case LUA_TNIL:
+        {
+            TString* s = L->global->ttname[LUA_TNIL];
+            setsvalue(L, res, s);
+            return 1;
+        }
+        case LUA_TBOOLEAN:
+        {
+            TString* s = bvalue(arg0) ? luaS_newliteral(L, "true") : luaS_newliteral(L, "false");
+            setsvalue(L, res, s);
+            return 1;
+        }
+        case LUA_TNUMBER:
+        {
+            if (DFFlag::LuauFastcallGC && luaC_needsGC(L))
+                return -1; // we can't call luaC_checkGC so fall back to C implementation
+
+            char s[LUAI_MAXNUM2STR];
+            char* e = luai_num2str(s, nvalue(arg0));
+            setsvalue(L, res, luaS_newlstr(L, s, e - s));
+            return 1;
+        }
+        case LUA_TSTRING:
+        {
+            setsvalue(L, res, tsvalue(arg0));
+            return 1;
+        }
+        }
+
+        // fall back to generic C implementation
+    }
+
+    return -1;
+}
+
+static int luauF_missing(lua_State* L, StkId res, TValue* arg0, int nresults, StkId args, int nparams)
+{
+    return -1;
+}
+
+#ifdef LUAU_TARGET_SSE41
+template<int Rounding>
+LUAU_TARGET_SSE41 inline double roundsd_sse41(double v)
+{
+    __m128d av = _mm_set_sd(v);
+    __m128d rv = _mm_round_sd(av, av, Rounding | _MM_FROUND_NO_EXC);
+    return _mm_cvtsd_f64(rv);
+}
+
+LUAU_TARGET_SSE41 static int luauF_floor_sse41(lua_State* L, StkId res, TValue* arg0, int nresults, StkId args, int nparams)
+{
+    if (nparams >= 1 && nresults <= 1 && ttisnumber(arg0))
+    {
+        double a1 = nvalue(arg0);
+        setnvalue(res, roundsd_sse41<_MM_FROUND_TO_NEG_INF>(a1));
+        return 1;
+    }
+
+    return -1;
+}
+
+LUAU_TARGET_SSE41 static int luauF_ceil_sse41(lua_State* L, StkId res, TValue* arg0, int nresults, StkId args, int nparams)
+{
+    if (nparams >= 1 && nresults <= 1 && ttisnumber(arg0))
+    {
+        double a1 = nvalue(arg0);
+        setnvalue(res, roundsd_sse41<_MM_FROUND_TO_POS_INF>(a1));
+        return 1;
+    }
+
+    return -1;
+}
+
+LUAU_TARGET_SSE41 static int luauF_round_sse41(lua_State* L, StkId res, TValue* arg0, int nresults, StkId args, int nparams)
+{
+    if (nparams >= 1 && nresults <= 1 && ttisnumber(arg0))
+    {
+        double a1 = nvalue(arg0);
+        // roundsd only supports bankers rounding natively, so we need to emulate rounding by using truncation
+        // offset is prevfloat(0.5), which is important so that we round prevfloat(0.5) to 0.
+        const double offset = 0.49999999999999994;
+        setnvalue(res, roundsd_sse41<_MM_FROUND_TO_ZERO>(a1 + (a1 < 0 ? -offset : offset)));
+        return 1;
+    }
+
+    return -1;
+}
+
+static bool luau_hassse41()
+{
+    int cpuinfo[4] = {};
+#ifdef _MSC_VER
+    __cpuid(cpuinfo, 1);
+#else
+    __cpuid(1, cpuinfo[0], cpuinfo[1], cpuinfo[2], cpuinfo[3]);
+#endif
+
+    // We requre SSE4.1 support for ROUNDSD
+    // https://en.wikipedia.org/wiki/CPUID#EAX=1:_Processor_Info_and_Feature_Bits
+    return (cpuinfo[2] & (1 << 19)) != 0;
+}
+#endif
+
+const luau_FastFunction luauF_table[256] = {
     NULL,
     luauF_assert,
 
@@ -1202,12 +1398,24 @@ luau_FastFunction luauF_table[256] = {
     luauF_asin,
     luauF_atan2,
     luauF_atan,
+
+#ifdef LUAU_TARGET_SSE41
+    luau_hassse41() ? luauF_ceil_sse41 : luauF_ceil,
+#else
     luauF_ceil,
+#endif
+
     luauF_cosh,
     luauF_cos,
     luauF_deg,
     luauF_exp,
+
+#ifdef LUAU_TARGET_SSE41
+    luau_hassse41() ? luauF_floor_sse41 : luauF_floor,
+#else
     luauF_floor,
+#endif
+
     luauF_fmod,
     luauF_frexp,
     luauF_ldexp,
@@ -1249,7 +1457,12 @@ luau_FastFunction luauF_table[256] = {
 
     luauF_clamp,
     luauF_sign,
+
+#ifdef LUAU_TARGET_SSE41
+    luau_hassse41() ? luauF_round_sse41 : luauF_round,
+#else
     luauF_round,
+#endif
 
     luauF_rawset,
     luauF_rawget,
@@ -1268,4 +1481,26 @@ luau_FastFunction luauF_table[256] = {
     luauF_rawlen,
 
     luauF_extractk,
+
+    luauF_getmetatable,
+    luauF_setmetatable,
+
+    luauF_tonumber,
+    luauF_tostring,
+
+// When adding builtins, add them above this line; what follows is 64 "dummy" entries with luauF_missing fallback.
+// This is important so that older versions of the runtime that don't support newer builtins automatically fall back via luauF_missing.
+// Given the builtin addition velocity this should always provide a larger compatibility window than bytecode versions suggest.
+#define MISSING8 luauF_missing, luauF_missing, luauF_missing, luauF_missing, luauF_missing, luauF_missing, luauF_missing, luauF_missing
+
+    MISSING8,
+    MISSING8,
+    MISSING8,
+    MISSING8,
+    MISSING8,
+    MISSING8,
+    MISSING8,
+    MISSING8,
+
+#undef MISSING8
 };

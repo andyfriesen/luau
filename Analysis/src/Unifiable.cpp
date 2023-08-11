@@ -6,63 +6,12 @@ namespace Luau
 namespace Unifiable
 {
 
-Free::Free(TypeLevel level)
-    : index(++nextIndex)
-    , level(level)
+static int nextIndex = 0;
+
+int freshIndex()
 {
+    return ++nextIndex;
 }
-
-Free::Free(Scope* scope)
-    : index(++nextIndex)
-    , scope(scope)
-{
-}
-
-int Free::nextIndex = 0;
-
-Generic::Generic()
-    : index(++nextIndex)
-    , name("g" + std::to_string(index))
-{
-}
-
-Generic::Generic(TypeLevel level)
-    : index(++nextIndex)
-    , level(level)
-    , name("g" + std::to_string(index))
-{
-}
-
-Generic::Generic(const Name& name)
-    : index(++nextIndex)
-    , name(name)
-    , explicitName(true)
-{
-}
-
-Generic::Generic(Scope* scope)
-    : index(++nextIndex)
-    , scope(scope)
-{
-}
-
-Generic::Generic(TypeLevel level, const Name& name)
-    : index(++nextIndex)
-    , level(level)
-    , name(name)
-    , explicitName(true)
-{
-}
-
-Generic::Generic(Scope* scope, const Name& name)
-    : index(++nextIndex)
-    , scope(scope)
-    , name(name)
-    , explicitName(true)
-{
-}
-
-int Generic::nextIndex = 0;
 
 Error::Error()
     : index(++nextIndex)
