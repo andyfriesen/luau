@@ -51,7 +51,7 @@ def _impl(ctx):
         a = build_vcxproj(ctx, vcxproj_file_script, actions, target, db_artifact)
         ctx.output.ensure(a)
 
-sln = bxl(
+sln = bxl_main(
     impl=_impl,
     cli_args={
         "targets": cli_args.string()
