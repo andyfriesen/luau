@@ -1,12 +1,24 @@
 # FIXME: Toolchain-friendly way to specify the C++ language standard?
 # FIXME: Preprocessor definitions?
 
+load("//compdb:defs.bzl", "combine_compdbs")
+
+cxx_library(
+    name='config',
+    srcs=glob(["Config/src/*.cpp"]),
+    exported_headers=glob(['Config/include/**/*.h']),
+    public_include_directories=['Config/include'],
+    exported_deps=["//Common:common", "//Ast:ast"],
+    link_style='static',
+    visibility=['PUBLIC'],
+)
+
 cxx_library(
     name="analysis",
     srcs=glob(["Analysis/src/*.cpp"]),
     exported_headers=glob(["Analysis/include/**/*.h"]),
     public_include_directories=["Analysis/include"],
-    deps=["//Common:common", "//Ast:ast"],
+    exported_deps=["//Common:common", "//Ast:ast", "//:config"],
     link_style="static",
     visibility=["PUBLIC"],
 )
@@ -28,7 +40,7 @@ cxx_library(
     # VM/src most certainly should not be public here
     public_include_directories=["VM/include", "VM/src"],
     link_style="static",
-    deps=["//Common:common"],
+    exported_deps=["//Common:common"],
     compiler_flags=lvmexecute_compiler_flags,
 )
 
@@ -36,6 +48,7 @@ cxx_library(
     name="vm",
     exported_headers=[
         "VM/src/lapi.h",
+        "VM/src/lbuffer.h",
         "VM/src/lbuiltins.h",
         "VM/src/lbytecode.h",
         "VM/src/lcommon.h",
@@ -61,6 +74,8 @@ cxx_library(
         "VM/src/laux.cpp",
         "VM/src/lbaselib.cpp",
         "VM/src/lbitlib.cpp",
+        "VM/src/lbuffer.cpp",
+        "VM/src/lbuflib.cpp",
         "VM/src/lbuiltins.cpp",
         "VM/src/lcorolib.cpp",
         "VM/src/ldblib.cpp",
@@ -244,5 +259,20 @@ cxx_binary(
         ":isocline",
         "//Common:common",
         "//Ast:ast",
+    ],
+)
+
+combine_compdbs(
+    name='compile-commands',
+    databases=[
+        '//:analysis[compilation-database]',
+        '//:lvmexecute[compilation-database]',
+        '//:vm[compilation-database]',
+        '//:luau-compiler[compilation-database]',
+        '//:codegen[compilation-database]',
+        '//:cli[compilation-database]',
+        '//:isocline[compilation-database]',
+        '//:Luau.UnitTest[compilation-database]',
+        '//:Luau.Repl.CLI[compilation-database]',
     ],
 )

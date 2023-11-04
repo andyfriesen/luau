@@ -2,7 +2,6 @@
 
 import sys
 import argparse
-from typing import List
 import json
 
 parser = argparse.ArgumentParser()
@@ -10,7 +9,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument("database", nargs='+')
 parser.add_argument('--output', '-o', dest='output', required=True)
 
-def main(argv: List[str]):
+def main(argv):
     args = parser.parse_args(argv)
 
     result = {}
