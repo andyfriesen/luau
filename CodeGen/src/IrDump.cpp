@@ -61,6 +61,14 @@ static const char* getTagName(uint8_t tag)
         return "tuserdata";
     case LUA_TTHREAD:
         return "tthread";
+    case LUA_TBUFFER:
+        return "tbuffer";
+    case LUA_TPROTO:
+        return "tproto";
+    case LUA_TUPVAL:
+        return "tupval";
+    case LUA_TDEADKEY:
+        return "tdeadkey";
     default:
         LUAU_ASSERT(!"Unknown type tag");
         LUAU_UNREACHABLE();
@@ -83,8 +91,6 @@ const char* getCmdName(IrCmd cmd)
         return "LOAD_INT";
     case IrCmd::LOAD_TVALUE:
         return "LOAD_TVALUE";
-    case IrCmd::LOAD_NODE_VALUE_TV:
-        return "LOAD_NODE_VALUE_TV";
     case IrCmd::LOAD_ENV:
         return "LOAD_ENV";
     case IrCmd::GET_ARR_ADDR:
@@ -93,6 +99,8 @@ const char* getCmdName(IrCmd cmd)
         return "GET_SLOT_NODE_ADDR";
     case IrCmd::GET_HASH_NODE_ADDR:
         return "GET_HASH_NODE_ADDR";
+    case IrCmd::GET_CLOSURE_UPVAL_ADDR:
+        return "GET_CLOSURE_UPVAL_ADDR";
     case IrCmd::STORE_TAG:
         return "STORE_TAG";
     case IrCmd::STORE_POINTER:
@@ -105,8 +113,8 @@ const char* getCmdName(IrCmd cmd)
         return "STORE_VECTOR";
     case IrCmd::STORE_TVALUE:
         return "STORE_TVALUE";
-    case IrCmd::STORE_NODE_VALUE_TV:
-        return "STORE_NODE_VALUE_TV";
+    case IrCmd::STORE_SPLIT_TVALUE:
+        return "STORE_SPLIT_TVALUE";
     case IrCmd::ADD_INT:
         return "ADD_INT";
     case IrCmd::SUB_INT:
@@ -119,6 +127,8 @@ const char* getCmdName(IrCmd cmd)
         return "MUL_NUM";
     case IrCmd::DIV_NUM:
         return "DIV_NUM";
+    case IrCmd::IDIV_NUM:
+        return "IDIV_NUM";
     case IrCmd::MOD_NUM:
         return "MOD_NUM";
     case IrCmd::MIN_NUM:
@@ -139,6 +149,8 @@ const char* getCmdName(IrCmd cmd)
         return "ABS_NUM";
     case IrCmd::NOT_ANY:
         return "NOT_ANY";
+    case IrCmd::CMP_ANY:
+        return "CMP_ANY";
     case IrCmd::JUMP:
         return "JUMP";
     case IrCmd::JUMP_IF_TRUTHY:
@@ -147,22 +159,22 @@ const char* getCmdName(IrCmd cmd)
         return "JUMP_IF_FALSY";
     case IrCmd::JUMP_EQ_TAG:
         return "JUMP_EQ_TAG";
-    case IrCmd::JUMP_EQ_INT:
-        return "JUMP_EQ_INT";
-    case IrCmd::JUMP_LT_INT:
-        return "JUMP_LT_INT";
-    case IrCmd::JUMP_GE_UINT:
-        return "JUMP_GE_UINT";
+    case IrCmd::JUMP_CMP_INT:
+        return "JUMP_CMP_INT";
     case IrCmd::JUMP_EQ_POINTER:
         return "JUMP_EQ_POINTER";
     case IrCmd::JUMP_CMP_NUM:
         return "JUMP_CMP_NUM";
-    case IrCmd::JUMP_CMP_ANY:
-        return "JUMP_CMP_ANY";
+    case IrCmd::JUMP_FORN_LOOP_COND:
+        return "JUMP_FORN_LOOP_COND";
     case IrCmd::JUMP_SLOT_MATCH:
         return "JUMP_SLOT_MATCH";
     case IrCmd::TABLE_LEN:
         return "TABLE_LEN";
+    case IrCmd::TABLE_SETNUM:
+        return "TABLE_SETNUM";
+    case IrCmd::STRING_LEN:
+        return "STRING_LEN";
     case IrCmd::NEW_TABLE:
         return "NEW_TABLE";
     case IrCmd::DUP_TABLE:
@@ -205,10 +217,10 @@ const char* getCmdName(IrCmd cmd)
         return "GET_UPVALUE";
     case IrCmd::SET_UPVALUE:
         return "SET_UPVALUE";
-    case IrCmd::PREPARE_FORN:
-        return "PREPARE_FORN";
     case IrCmd::CHECK_TAG:
         return "CHECK_TAG";
+    case IrCmd::CHECK_TRUTHY:
+        return "CHECK_TRUTHY";
     case IrCmd::CHECK_READONLY:
         return "CHECK_READONLY";
     case IrCmd::CHECK_NO_METATABLE:
@@ -221,6 +233,8 @@ const char* getCmdName(IrCmd cmd)
         return "CHECK_SLOT_MATCH";
     case IrCmd::CHECK_NODE_NO_NEXT:
         return "CHECK_NODE_NO_NEXT";
+    case IrCmd::CHECK_NODE_VALUE:
+        return "CHECK_NODE_VALUE";
     case IrCmd::INTERRUPT:
         return "INTERRUPT";
     case IrCmd::CHECK_GC:
@@ -265,8 +279,8 @@ const char* getCmdName(IrCmd cmd)
         return "FALLBACK_PREPVARARGS";
     case IrCmd::FALLBACK_GETVARARGS:
         return "FALLBACK_GETVARARGS";
-    case IrCmd::FALLBACK_NEWCLOSURE:
-        return "FALLBACK_NEWCLOSURE";
+    case IrCmd::NEWCLOSURE:
+        return "NEWCLOSURE";
     case IrCmd::FALLBACK_DUPCLOSURE:
         return "FALLBACK_DUPCLOSURE";
     case IrCmd::FALLBACK_FORGPREP:
@@ -295,8 +309,16 @@ const char* getCmdName(IrCmd cmd)
         return "BITCOUNTLZ_UINT";
     case IrCmd::BITCOUNTRZ_UINT:
         return "BITCOUNTRZ_UINT";
+    case IrCmd::BYTESWAP_UINT:
+        return "BYTESWAP_UINT";
     case IrCmd::INVOKE_LIBM:
         return "INVOKE_LIBM";
+    case IrCmd::GET_TYPE:
+        return "GET_TYPE";
+    case IrCmd::GET_TYPEOF:
+        return "GET_TYPEOF";
+    case IrCmd::FINDUPVAL:
+        return "FINDUPVAL";
     }
 
     LUAU_UNREACHABLE();
@@ -383,6 +405,9 @@ void toString(IrToStringContext& ctx, IrOp op)
     case IrOpKind::VmUpvalue:
         append(ctx.result, "U%d", vmUpvalueOp(op));
         break;
+    case IrOpKind::VmExit:
+        append(ctx.result, "exit(%d)", vmExitOp(op));
+        break;
     }
 }
 
@@ -390,9 +415,6 @@ void toString(std::string& result, IrConst constant)
 {
     switch (constant.kind)
     {
-    case IrConstKind::Bool:
-        append(result, constant.valueBool ? "true" : "false");
-        break;
     case IrConstKind::Int:
         append(result, "%di", constant.valueInt);
         break;
@@ -659,28 +681,23 @@ std::string dump(const IrFunction& function)
     return result;
 }
 
-std::string toDot(const IrFunction& function, bool includeInst)
+static void appendLabelRegset(IrToStringContext& ctx, const std::vector<RegisterSet>& regSets, size_t blockIdx, const char* name)
 {
-    std::string result;
-    IrToStringContext ctx{result, function.blocks, function.constants, function.cfg};
+    if (blockIdx < regSets.size())
+    {
+        const RegisterSet& rs = regSets[blockIdx];
 
-    auto appendLabelRegset = [&ctx](const std::vector<RegisterSet>& regSets, size_t blockIdx, const char* name) {
-        if (blockIdx < regSets.size())
+        if (rs.regs.any() || rs.varargSeq)
         {
-            const RegisterSet& rs = regSets[blockIdx];
-
-            if (rs.regs.any() || rs.varargSeq)
-            {
-                append(ctx.result, "|{%s|", name);
-                appendRegisterSet(ctx, rs, "|");
-                append(ctx.result, "}");
-            }
+            append(ctx.result, "|{%s|", name);
+            appendRegisterSet(ctx, rs, "|");
+            append(ctx.result, "}");
         }
-    };
+    }
+}
 
-    append(ctx.result, "digraph CFG {\n");
-    append(ctx.result, "node[shape=record]\n");
-
+static void appendBlocks(IrToStringContext& ctx, const IrFunction& function, bool includeInst, bool includeIn, bool includeOut, bool includeDef)
+{
     for (size_t i = 0; i < function.blocks.size(); i++)
     {
         const IrBlock& block = function.blocks[i];
@@ -695,7 +712,8 @@ std::string toDot(const IrFunction& function, bool includeInst)
         append(ctx.result, "label=\"{");
         toString(ctx, block, uint32_t(i));
 
-        appendLabelRegset(ctx.cfg.in, i, "in");
+        if (includeIn)
+            appendLabelRegset(ctx, ctx.cfg.in, i, "in");
 
         if (includeInst && block.start != ~0u)
         {
@@ -712,11 +730,25 @@ std::string toDot(const IrFunction& function, bool includeInst)
             }
         }
 
-        appendLabelRegset(ctx.cfg.def, i, "def");
-        appendLabelRegset(ctx.cfg.out, i, "out");
+        if (includeDef)
+            appendLabelRegset(ctx, ctx.cfg.def, i, "def");
+
+        if (includeOut)
+            appendLabelRegset(ctx, ctx.cfg.out, i, "out");
 
         append(ctx.result, "}\"];\n");
     }
+}
+
+std::string toDot(const IrFunction& function, bool includeInst)
+{
+    std::string result;
+    IrToStringContext ctx{result, function.blocks, function.constants, function.cfg};
+
+    append(ctx.result, "digraph CFG {\n");
+    append(ctx.result, "node[shape=record]\n");
+
+    appendBlocks(ctx, function, includeInst, /* includeIn */ true, /* includeOut */ true, /* includeDef */ true);
 
     for (size_t i = 0; i < function.blocks.size(); i++)
     {
@@ -745,6 +777,107 @@ std::string toDot(const IrFunction& function, bool includeInst)
             checkOp(inst.d);
             checkOp(inst.e);
             checkOp(inst.f);
+        }
+    }
+
+    append(ctx.result, "}\n");
+
+    return result;
+}
+
+std::string toDotCfg(const IrFunction& function)
+{
+    std::string result;
+    IrToStringContext ctx{result, function.blocks, function.constants, function.cfg};
+
+    append(ctx.result, "digraph CFG {\n");
+    append(ctx.result, "node[shape=record]\n");
+
+    appendBlocks(ctx, function, /* includeInst */ false, /* includeIn */ false, /* includeOut */ false, /* includeDef */ true);
+
+    for (size_t i = 0; i < function.blocks.size() && i < ctx.cfg.successorsOffsets.size(); i++)
+    {
+        BlockIteratorWrapper succ = successors(ctx.cfg, unsigned(i));
+
+        for (uint32_t target : succ)
+            append(ctx.result, "b%u -> b%u;\n", unsigned(i), target);
+    }
+
+    append(ctx.result, "}\n");
+
+    return result;
+}
+
+std::string toDotDjGraph(const IrFunction& function)
+{
+    std::string result;
+    IrToStringContext ctx{result, function.blocks, function.constants, function.cfg};
+
+    append(ctx.result, "digraph CFG {\n");
+
+    for (size_t i = 0; i < ctx.blocks.size(); i++)
+    {
+        const IrBlock& block = ctx.blocks[i];
+
+        append(ctx.result, "b%u [", unsigned(i));
+
+        if (block.kind == IrBlockKind::Fallback)
+            append(ctx.result, "style=filled;fillcolor=salmon;");
+        else if (block.kind == IrBlockKind::Bytecode)
+            append(ctx.result, "style=filled;fillcolor=palegreen;");
+
+        append(ctx.result, "label=\"");
+        toString(ctx, block, uint32_t(i));
+        append(ctx.result, "\"];\n");
+    }
+
+    // Layer by depth in tree
+    uint32_t depth = 0;
+    bool found = true;
+
+    while (found)
+    {
+        found = false;
+
+        append(ctx.result, "{rank = same;");
+        for (size_t i = 0; i < ctx.cfg.domOrdering.size(); i++)
+        {
+            if (ctx.cfg.domOrdering[i].depth == depth)
+            {
+                append(ctx.result, "b%u;", unsigned(i));
+                found = true;
+            }
+        }
+        append(ctx.result, "}\n");
+
+        depth++;
+    }
+
+    for (size_t i = 0; i < ctx.cfg.domChildrenOffsets.size(); i++)
+    {
+        BlockIteratorWrapper dom = domChildren(ctx.cfg, unsigned(i));
+
+        for (uint32_t target : dom)
+            append(ctx.result, "b%u -> b%u;\n", unsigned(i), target);
+
+        // Join edges are all successor edges that do not strongly dominate
+        BlockIteratorWrapper succ = successors(ctx.cfg, unsigned(i));
+
+        for (uint32_t successor : succ)
+        {
+            bool found = false;
+
+            for (uint32_t target : dom)
+            {
+                if (target == successor)
+                {
+                    found = true;
+                    break;
+                }
+            }
+
+            if (!found)
+                append(ctx.result, "b%u -> b%u [style=dotted];\n", unsigned(i), successor);
         }
     }
 

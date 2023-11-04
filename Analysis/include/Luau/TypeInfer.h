@@ -9,8 +9,8 @@
 #include "Luau/Substitution.h"
 #include "Luau/Symbol.h"
 #include "Luau/TxnLog.h"
-#include "Luau/Type.h"
-#include "Luau/TypePack.h"
+#include "Luau/TypeFwd.h"
+#include "Luau/TypeCheckLimits.h"
 #include "Luau/TypeUtils.h"
 #include "Luau/Unifier.h"
 #include "Luau/UnifierSharedState.h"
@@ -19,18 +19,24 @@
 #include <unordered_map>
 #include <unordered_set>
 
-LUAU_FASTFLAG(LuauClassTypeVarsInSubstitution)
-
 namespace Luau
 {
 
 struct Scope;
 struct TypeChecker;
 struct ModuleResolver;
+struct FrontendCancellationToken;
 
 using Name = std::string;
 using ScopePtr = std::shared_ptr<Scope>;
-using OverloadErrorEntry = std::tuple<std::vector<TypeError>, std::vector<TypeId>, const FunctionType*>;
+
+struct OverloadErrorEntry
+{
+    TxnLog log;
+    ErrorVec errors;
+    std::vector<TypeId> arguments;
+    const FunctionType* fnTy;
+};
 
 bool doesCallError(const AstExprCall* call);
 bool hasBreak(AstStat* node);
@@ -48,26 +54,6 @@ struct GenericTypeDefinitions
 struct HashBoolNamePair
 {
     size_t operator()(const std::pair<bool, Name>& pair) const;
-};
-
-class TimeLimitError : public InternalCompilerError
-{
-public:
-    explicit TimeLimitError(const std::string& moduleName)
-        : InternalCompilerError("Typeinfer failed to complete in allotted time", moduleName)
-    {
-    }
-};
-
-struct GlobalTypes
-{
-    GlobalTypes(NotNull<BuiltinTypes> builtinTypes);
-
-    NotNull<BuiltinTypes> builtinTypes; // Global types are based on builtin types
-
-    TypeArena globalTypes;
-    SourceModule globalNames; // names for symbols entered into globalScope
-    ScopePtr globalScope;     // shared by all modules
 };
 
 // All Types are retained via Environment::types.  All TypeIds
@@ -166,7 +152,7 @@ struct TypeChecker
         const std::vector<OverloadErrorEntry>& errors);
     void reportOverloadResolutionError(const ScopePtr& scope, const AstExprCall& expr, TypePackId retPack, TypePackId argPack,
         const std::vector<Location>& argLocations, const std::vector<TypeId>& overloads, const std::vector<TypeId>& overloadsThatMatchArgCount,
-        const std::vector<OverloadErrorEntry>& errors);
+        std::vector<OverloadErrorEntry>& errors);
 
     WithPredicate<TypePackId> checkExprList(const ScopePtr& scope, const Location& location, const AstArray<AstExpr*>& exprs,
         bool substituteFreeForNil = false, const std::vector<bool>& lhsAnnotations = {},
@@ -257,6 +243,7 @@ public:
     [[noreturn]] void ice(const std::string& message, const Location& location);
     [[noreturn]] void ice(const std::string& message);
     [[noreturn]] void throwTimeLimitError();
+    [[noreturn]] void throwUserCancelError();
 
     ScopePtr childFunctionScope(const ScopePtr& parent, const Location& location, int subLevel = 0);
     ScopePtr childScope(const ScopePtr& parent, const Location& location);
@@ -381,6 +368,8 @@ public:
     std::optional<double> finishTime;
     std::optional<int> instantiationChildLimit;
     std::optional<int> unifierIterationLimit;
+
+    std::shared_ptr<FrontendCancellationToken> cancellationToken;
 
 public:
     const TypeId nilType;

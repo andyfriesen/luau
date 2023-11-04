@@ -11,6 +11,8 @@
 
 #include <algorithm>
 
+LUAU_FASTFLAG(DebugLuauReadWriteProperties)
+
 namespace Luau
 {
 
@@ -146,6 +148,16 @@ struct FindNode : public AstVisitor
         return false;
     }
 
+    bool visit(AstStatFunction* node) override
+    {
+        visit(static_cast<AstNode*>(node));
+        if (node->name->location.contains(pos))
+            node->name->visit(this);
+        else if (node->func->location.contains(pos))
+            node->func->visit(this);
+        return false;
+    }
+
     bool visit(AstStatBlock* block) override
     {
         visit(static_cast<AstNode*>(block));
@@ -184,6 +196,16 @@ struct FindFullAncestry final : public AstVisitor
             return visit(static_cast<AstNode*>(type));
         else
             return false;
+    }
+
+    bool visit(AstStatFunction* node) override
+    {
+        visit(static_cast<AstNode*>(node));
+        if (node->name->location.contains(pos))
+            node->name->visit(this);
+        else if (node->func->location.contains(pos))
+            node->func->visit(this);
+        return false;
     }
 
     bool visit(AstNode* node) override
@@ -501,12 +523,28 @@ std::optional<DocumentationSymbol> getDocumentationSymbolAtPosition(const Source
                 if (const TableType* ttv = get<TableType>(parentTy))
                 {
                     if (auto propIt = ttv->props.find(indexName->index.value); propIt != ttv->props.end())
-                        return checkOverloadedDocumentationSymbol(module, propIt->second.type(), parentExpr, propIt->second.documentationSymbol);
+                    {
+                        if (FFlag::DebugLuauReadWriteProperties)
+                        {
+                            if (auto ty = propIt->second.readType())
+                                return checkOverloadedDocumentationSymbol(module, *ty, parentExpr, propIt->second.documentationSymbol);
+                        }
+                        else
+                            return checkOverloadedDocumentationSymbol(module, propIt->second.type(), parentExpr, propIt->second.documentationSymbol);
+                    }
                 }
                 else if (const ClassType* ctv = get<ClassType>(parentTy))
                 {
                     if (auto propIt = ctv->props.find(indexName->index.value); propIt != ctv->props.end())
-                        return checkOverloadedDocumentationSymbol(module, propIt->second.type(), parentExpr, propIt->second.documentationSymbol);
+                    {
+                        if (FFlag::DebugLuauReadWriteProperties)
+                        {
+                            if (auto ty = propIt->second.readType())
+                                return checkOverloadedDocumentationSymbol(module, *ty, parentExpr, propIt->second.documentationSymbol);
+                        }
+                        else
+                            return checkOverloadedDocumentationSymbol(module, propIt->second.type(), parentExpr, propIt->second.documentationSymbol);
+                    }
                 }
             }
         }

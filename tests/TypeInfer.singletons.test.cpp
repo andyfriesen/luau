@@ -7,7 +7,23 @@
 
 using namespace Luau;
 
+LUAU_FASTFLAG(DebugLuauDeferredConstraintResolution);
+
 TEST_SUITE_BEGIN("TypeSingletons");
+
+TEST_CASE_FIXTURE(Fixture, "function_args_infer_singletons")
+{
+    CheckResult result = check(R"(
+--!strict
+type Phase = "A" | "B" | "C"
+local function f(e : Phase) : number
+    return 0
+end
+local e = f("B")
+)");
+
+    LUAU_REQUIRE_NO_ERRORS(result);
+}
 
 TEST_CASE_FIXTURE(Fixture, "bool_singletons")
 {
@@ -309,10 +325,11 @@ local a: Animal = { tag = 'cat', cafood = 'something' }
     )");
 
     LUAU_REQUIRE_ERROR_COUNT(1, result);
-    CHECK_EQ(R"(Type 'a' could not be converted into 'Cat | Dog'
+    const std::string expected = R"(Type 'a' could not be converted into 'Cat | Dog'
 caused by:
-  None of the union options are compatible. For example: Table type 'a' not compatible with type 'Cat' because the former is missing field 'catfood')",
-        toString(result.errors[0]));
+  None of the union options are compatible. For example:
+Table type 'a' not compatible with type 'Cat' because the former is missing field 'catfood')";
+    CHECK_EQ(expected, toString(result.errors[0]));
 }
 
 TEST_CASE_FIXTURE(Fixture, "error_detailed_tagged_union_mismatch_bool")
@@ -326,10 +343,11 @@ local a: Result = { success = false, result = 'something' }
     )");
 
     LUAU_REQUIRE_ERROR_COUNT(1, result);
-    CHECK_EQ(R"(Type 'a' could not be converted into 'Bad | Good'
+    const std::string expected = R"(Type 'a' could not be converted into 'Bad | Good'
 caused by:
-  None of the union options are compatible. For example: Table type 'a' not compatible with type 'Bad' because the former is missing field 'error')",
-        toString(result.errors[0]));
+  None of the union options are compatible. For example:
+Table type 'a' not compatible with type 'Bad' because the former is missing field 'error')";
+    CHECK_EQ(expected, toString(result.errors[0]));
 }
 
 TEST_CASE_FIXTURE(Fixture, "parametric_tagged_union_alias")
@@ -337,7 +355,6 @@ TEST_CASE_FIXTURE(Fixture, "parametric_tagged_union_alias")
     ScopedFastFlag sff[] = {
         {"DebugLuauDeferredConstraintResolution", true},
     };
-
     CheckResult result = check(R"(
         type Ok<T> = {success: true, result: T}
         type Err<T> = {success: false, error: T}
@@ -349,10 +366,8 @@ TEST_CASE_FIXTURE(Fixture, "parametric_tagged_union_alias")
 
     LUAU_REQUIRE_ERROR_COUNT(1, result);
 
-    const std::string expectedError = "Type 'a' could not be converted into 'Err<number> | Ok<string>'\n"
-                                      "caused by:\n"
-                                      "  None of the union options are compatible. For example: Table type 'a'"
-                                      " not compatible with type 'Err<number>' because the former is missing field 'error'";
+    const std::string expectedError =
+        "Type 'a' could not be converted into 'Err<number> | Ok<string>'; type a (a) is not a subtype of Err<number> | Ok<string>[1] (Err<number>)";
 
     CHECK(toString(result.errors[0]) == expectedError);
 }
@@ -390,8 +405,6 @@ TEST_CASE_FIXTURE(Fixture, "widen_the_supertype_if_it_is_free_and_subtype_has_si
 
 TEST_CASE_FIXTURE(Fixture, "return_type_of_f_is_not_widened")
 {
-    ScopedFastFlag sff{"LuauUnifyTwoOptions", true};
-
     CheckResult result = check(R"(
         local function foo(f, x): "hello"? -- anyone there?
             return if x == "hi"
@@ -403,9 +416,7 @@ TEST_CASE_FIXTURE(Fixture, "return_type_of_f_is_not_widened")
     LUAU_REQUIRE_NO_ERRORS(result);
 
     CHECK_EQ(R"("hi")", toString(requireTypeAtPosition({3, 23})));
-    CHECK_EQ(R"(<a, b...>((string) -> ("hello", b...), a) -> "hello"?)", toString(requireType("foo")));
-
-    // This is more accurate but we're not there yet:
+    CHECK_EQ(R"(<a, b, c...>((string) -> (a, c...), b) -> "hello"?)", toString(requireType("foo")));
     // CHECK_EQ(R"(<a, b...>((string) -> ("hello"?, b...), a) -> "hello"?)", toString(requireType("foo")));
 }
 

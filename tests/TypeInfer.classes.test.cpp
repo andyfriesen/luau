@@ -12,7 +12,7 @@
 using namespace Luau;
 using std::nullopt;
 
-LUAU_FASTFLAG(LuauTypeMismatchInvarianceInError);
+LUAU_FASTFLAG(DebugLuauDeferredConstraintResolution);
 
 TEST_SUITE_BEGIN("TypeInferClasses");
 
@@ -367,6 +367,9 @@ b.X = 2 -- real Vector2.X is also read-only
 
 TEST_CASE_FIXTURE(ClassFixture, "detailed_class_unification_error")
 {
+    ScopedFastFlag sff[] = {
+        {"LuauAlwaysCommitInferencesOfFunctionCalls", true},
+    };
     CheckResult result = check(R"(
 local function foo(v)
     return v.X :: number + string.len(v.Y)
@@ -378,10 +381,11 @@ b(a)
     )");
 
     LUAU_REQUIRE_ERROR_COUNT(1, result);
-    CHECK_EQ(R"(Type 'Vector2' could not be converted into '{- X: a, Y: string -}'
+    const std::string expected = R"(Type 'Vector2' could not be converted into '{- X: number, Y: string -}'
 caused by:
-  Property 'Y' is not compatible. Type 'number' could not be converted into 'string')",
-        toString(result.errors[0]));
+  Property 'Y' is not compatible.
+Type 'number' could not be converted into 'string')";
+    CHECK_EQ(expected, toString(result.errors[0]));
 }
 
 TEST_CASE_FIXTURE(ClassFixture, "class_type_mismatch_with_name_conflict")
@@ -422,8 +426,6 @@ TEST_CASE_FIXTURE(ClassFixture, "unions_of_intersections_of_classes")
 
 TEST_CASE_FIXTURE(ClassFixture, "index_instance_property")
 {
-    ScopedFastFlag luauAllowIndexClassParameters{"LuauAllowIndexClassParameters", true};
-
     CheckResult result = check(R"(
         local function execute(object: BaseClass, name: string)
             print(object[name])
@@ -436,8 +438,6 @@ TEST_CASE_FIXTURE(ClassFixture, "index_instance_property")
 
 TEST_CASE_FIXTURE(ClassFixture, "index_instance_property_nonstrict")
 {
-    ScopedFastFlag luauAllowIndexClassParameters{"LuauAllowIndexClassParameters", true};
-
     CheckResult result = check(R"(
         --!nonstrict
 
@@ -460,14 +460,11 @@ local b: B = a
     )");
 
     LUAU_REQUIRE_ERRORS(result);
-    if (FFlag::LuauTypeMismatchInvarianceInError)
-        CHECK_EQ(toString(result.errors[0]), R"(Type 'A' could not be converted into 'B'
+    const std::string expected = R"(Type 'A' could not be converted into 'B'
 caused by:
-  Property 'x' is not compatible. Type 'ChildClass' could not be converted into 'BaseClass' in an invariant context)");
-    else
-        CHECK_EQ(toString(result.errors[0]), R"(Type 'A' could not be converted into 'B'
-caused by:
-  Property 'x' is not compatible. Type 'ChildClass' could not be converted into 'BaseClass')");
+  Property 'x' is not compatible.
+Type 'ChildClass' could not be converted into 'BaseClass' in an invariant context)";
+    CHECK_EQ(expected, toString(result.errors[0]));
 }
 
 TEST_CASE_FIXTURE(ClassFixture, "callable_classes")
@@ -484,7 +481,6 @@ TEST_CASE_FIXTURE(ClassFixture, "callable_classes")
 TEST_CASE_FIXTURE(ClassFixture, "indexable_classes")
 {
     // Test reading from an index
-    ScopedFastFlag LuauTypecheckClassTypeIndexers("LuauTypecheckClassTypeIndexers", true);
     {
         CheckResult result = check(R"(
             local x : IndexableClass

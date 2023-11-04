@@ -1,6 +1,7 @@
 // This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 #include "Luau/ToString.h"
 
+#include "Luau/Common.h"
 #include "Luau/Constraint.h"
 #include "Luau/Location.h"
 #include "Luau/Scope.h"
@@ -10,11 +11,15 @@
 #include "Luau/Type.h"
 #include "Luau/TypeFamily.h"
 #include "Luau/VisitType.h"
+#include "Luau/TypeOrPack.h"
 
 #include <algorithm>
 #include <stdexcept>
+#include <string>
 
 LUAU_FASTFLAG(DebugLuauDeferredConstraintResolution)
+LUAU_FASTFLAGVARIABLE(LuauToStringPrettifyLocation, false)
+LUAU_FASTFLAGVARIABLE(LuauToStringSimpleCompositeTypesSingleLine, false)
 
 /*
  * Enables increasing levels of verbosity for Luau type names when stringifying.
@@ -71,6 +76,28 @@ struct FindCyclicTypes final : TypeVisitor
     bool visit(TypePackId tp) override
     {
         return visitedPacks.insert(tp).second;
+    }
+
+    bool visit(TypeId ty, const FreeType& ft) override
+    {
+        if (!visited.insert(ty).second)
+            return false;
+
+        if (FFlag::DebugLuauDeferredConstraintResolution)
+        {
+            // TODO: Replace these if statements with assert()s when we
+            // delete FFlag::DebugLuauDeferredConstraintResolution.
+            //
+            // When the old solver is used, these pointers are always
+            // unused. When the new solver is used, they are never null.
+
+            if (ft.lowerBound)
+                traverse(ft.lowerBound);
+            if (ft.upperBound)
+                traverse(ft.upperBound);
+        }
+
+        return false;
     }
 
     bool visit(TypeId ty, const TableType& ttv) override
@@ -335,6 +362,44 @@ struct TypeStringifier
             tv->ty);
     }
 
+    void stringify(const std::string& name, const Property& prop)
+    {
+        if (isIdentifier(name))
+            state.emit(name);
+        else
+        {
+            state.emit("[\"");
+            state.emit(escape(name));
+            state.emit("\"]");
+        }
+        state.emit(": ");
+
+        if (FFlag::DebugLuauReadWriteProperties)
+        {
+            // We special case the stringification if the property's read and write types are shared.
+            if (prop.isShared())
+                return stringify(*prop.readType());
+
+            // Otherwise emit them separately.
+            if (auto ty = prop.readType())
+            {
+                state.emit("read ");
+                stringify(*ty);
+            }
+
+            if (prop.readType() && prop.writeType())
+                state.emit(" + ");
+
+            if (auto ty = prop.writeType())
+            {
+                state.emit("write ");
+                stringify(*ty);
+            }
+        }
+        else
+            stringify(prop.type());
+    }
+
     void stringify(TypePackId tp);
     void stringify(TypePackId tpid, const std::vector<std::optional<FunctionArgument>>& names);
 
@@ -387,6 +452,38 @@ struct TypeStringifier
     void operator()(TypeId ty, const FreeType& ftv)
     {
         state.result.invalid = true;
+
+        // TODO: ftv.lowerBound and ftv.upperBound should always be non-nil when
+        // the new solver is used. This can be replaced with an assert.
+        if (FFlag::DebugLuauDeferredConstraintResolution && ftv.lowerBound && ftv.upperBound)
+        {
+            const TypeId lowerBound = follow(ftv.lowerBound);
+            const TypeId upperBound = follow(ftv.upperBound);
+            if (get<NeverType>(lowerBound) && get<UnknownType>(upperBound))
+            {
+                state.emit("'");
+                state.emit(state.getName(ty));
+            }
+            else
+            {
+                state.emit("(");
+                if (!get<NeverType>(lowerBound))
+                {
+                    stringify(lowerBound);
+                    state.emit(" <: ");
+                }
+                state.emit("'");
+                state.emit(state.getName(ty));
+
+                if (!get<UnknownType>(upperBound))
+                {
+                    state.emit(" <: ");
+                    stringify(upperBound);
+                }
+                state.emit(")");
+            }
+            return;
+        }
 
         if (FInt::DebugLuauVerboseTypeNames >= 1)
             state.emit("free-");
@@ -525,6 +622,12 @@ struct TypeStringifier
             state.emit(">");
         }
 
+        if (FFlag::DebugLuauDeferredConstraintResolution)
+        {
+            if (ftv.isCheckedFunction)
+                state.emit("@checked ");
+        }
+
         state.emit("(");
 
         if (state.opts.functionTypeArguments)
@@ -602,16 +705,33 @@ struct TypeStringifier
 
         std::string openbrace = "@@@";
         std::string closedbrace = "@@@?!";
-        switch (state.opts.hideTableKind ? TableState::Unsealed : ttv.state)
+        switch (state.opts.hideTableKind ? (FFlag::DebugLuauDeferredConstraintResolution ? TableState::Sealed : TableState::Unsealed) : ttv.state)
         {
         case TableState::Sealed:
-            state.result.invalid = true;
-            openbrace = "{|";
-            closedbrace = "|}";
+            if (FFlag::DebugLuauDeferredConstraintResolution)
+            {
+                openbrace = "{";
+                closedbrace = "}";
+            }
+            else
+            {
+                state.result.invalid = true;
+                openbrace = "{|";
+                closedbrace = "|}";
+            }
             break;
         case TableState::Unsealed:
-            openbrace = "{";
-            closedbrace = "}";
+            if (FFlag::DebugLuauDeferredConstraintResolution)
+            {
+                state.result.invalid = true;
+                openbrace = "{|";
+                closedbrace = "|}";
+            }
+            else
+            {
+                openbrace = "{";
+                closedbrace = "}";
+            }
             break;
         case TableState::Free:
             state.result.invalid = true;
@@ -672,16 +792,8 @@ struct TypeStringifier
                 break;
             }
 
-            if (isIdentifier(name))
-                state.emit(name);
-            else
-            {
-                state.emit("[\"");
-                state.emit(escape(name));
-                state.emit("\"]");
-            }
-            state.emit(": ");
-            stringify(prop.type());
+            stringify(name, prop);
+
             comma = true;
             ++index;
         }
@@ -775,11 +887,15 @@ struct TypeStringifier
             state.emit("(");
 
         bool first = true;
+        bool shouldPlaceOnNewlines = results.size() > state.opts.compositeTypesSingleLineLimit;
         for (std::string& ss : results)
         {
             if (!first)
             {
-                state.newline();
+                if (shouldPlaceOnNewlines)
+                    state.newline();
+                else
+                    state.emit(" ");
                 state.emit("| ");
             }
             state.emit(ss);
@@ -799,7 +915,7 @@ struct TypeStringifier
         }
     }
 
-    void operator()(TypeId, const IntersectionType& uv)
+    void operator()(TypeId ty, const IntersectionType& uv)
     {
         if (state.hasSeen(&uv))
         {
@@ -835,11 +951,15 @@ struct TypeStringifier
             std::sort(results.begin(), results.end());
 
         bool first = true;
+        bool shouldPlaceOnNewlines = results.size() > state.opts.compositeTypesSingleLineLimit || isOverloadedFunction(ty);
         for (std::string& ss : results)
         {
             if (!first)
             {
-                state.newline();
+                if (shouldPlaceOnNewlines)
+                    state.newline();
+                else
+                    state.emit(" ");
                 state.emit("& ");
             }
             state.emit(ss);
@@ -1574,21 +1694,6 @@ std::string toString(const Constraint& constraint, ToStringOptions& opts)
             std::string superStr = tos(c.superType);
             return subStr + " ~ inst " + superStr;
         }
-        else if constexpr (std::is_same_v<T, UnaryConstraint>)
-        {
-            std::string resultStr = tos(c.resultType);
-            std::string operandStr = tos(c.operandType);
-
-            return resultStr + " ~ Unary<" + toString(c.op) + ", " + operandStr + ">";
-        }
-        else if constexpr (std::is_same_v<T, BinaryConstraint>)
-        {
-            std::string resultStr = tos(c.resultType);
-            std::string leftStr = tos(c.leftType);
-            std::string rightStr = tos(c.rightType);
-
-            return resultStr + " ~ Binary<" + toString(c.op) + ", " + leftStr + ", " + rightStr + ">";
-        }
         else if constexpr (std::is_same_v<T, IterableConstraint>)
         {
             std::string iteratorStr = tos(c.iterator);
@@ -1643,6 +1748,23 @@ std::string toString(const Constraint& constraint, ToStringOptions& opts)
         {
             const char* op = c.mode == RefineConstraint::Union ? "union" : "intersect";
             return tos(c.resultType) + " ~ refine " + tos(c.type) + " " + op + " " + tos(c.discriminant);
+        }
+        else if constexpr (std::is_same_v<T, SetOpConstraint>)
+        {
+            const char* op = c.mode == SetOpConstraint::Union ? " | " : " & ";
+            std::string res = tos(c.resultType) + " ~ ";
+            bool first = true;
+            for (TypeId t : c.types)
+            {
+                if (first)
+                    first = false;
+                else
+                    res += op;
+
+                res += tos(t);
+            }
+
+            return res;
         }
         else if constexpr (std::is_same_v<T, ReduceConstraint>)
             return "reduce " + tos(c.ty);
@@ -1709,9 +1831,37 @@ std::string toString(const Position& position)
     return "{ line = " + std::to_string(position.line) + ", col = " + std::to_string(position.column) + " }";
 }
 
-std::string toString(const Location& location)
+std::string toString(const Location& location, int offset, bool useBegin)
 {
-    return "Location { " + toString(location.begin) + ", " + toString(location.end) + " }";
+    if (FFlag::LuauToStringPrettifyLocation)
+    {
+        return "(" + std::to_string(location.begin.line + offset) + ", " + std::to_string(location.begin.column + offset) + ") - (" +
+               std::to_string(location.end.line + offset) + ", " + std::to_string(location.end.column + offset) + ")";
+    }
+    else
+    {
+        return "Location { " + toString(location.begin) + ", " + toString(location.end) + " }";
+    }
+}
+
+std::string toString(const TypeOrPack& tyOrTp, ToStringOptions& opts)
+{
+    if (const TypeId* ty = get<TypeId>(tyOrTp))
+        return toString(*ty, opts);
+    else if (const TypePackId* tp = get<TypePackId>(tyOrTp))
+        return toString(*tp, opts);
+    else
+        LUAU_UNREACHABLE();
+}
+
+std::string dump(const TypeOrPack& tyOrTp)
+{
+    ToStringOptions opts;
+    opts.exhaustive = true;
+    opts.functionTypeArguments = true;
+    std::string s = toString(tyOrTp, opts);
+    printf("%s\n", s.c_str());
+    return s;
 }
 
 } // namespace Luau

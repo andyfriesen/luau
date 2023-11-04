@@ -31,6 +31,9 @@ struct IsSubtypeFixture : Fixture
 
     bool isConsistentSubtype(TypeId a, TypeId b)
     {
+        // any test that is testing isConsistentSubtype is testing the old solver exclusively!
+        ScopedFastFlag noDcr{"DebugLuauDeferredConstraintResolution", false};
+
         Location location;
         ModulePtr module = getMainModule();
         REQUIRE(module);
@@ -169,7 +172,10 @@ TEST_CASE_FIXTURE(IsSubtypeFixture, "table_with_union_prop")
     TypeId a = requireType("a");
     TypeId b = requireType("b");
 
-    CHECK(isSubtype(a, b));
+    if (FFlag::DebugLuauDeferredConstraintResolution)
+        CHECK(!isSubtype(a, b)); // table properties are invariant
+    else
+        CHECK(isSubtype(a, b));
     CHECK(!isSubtype(b, a));
 }
 
@@ -187,7 +193,10 @@ TEST_CASE_FIXTURE(IsSubtypeFixture, "table_with_any_prop")
     TypeId a = requireType("a");
     TypeId b = requireType("b");
 
-    CHECK(isSubtype(a, b));
+    if (FFlag::DebugLuauDeferredConstraintResolution)
+        CHECK(!isSubtype(a, b)); // table properties are invariant
+    else
+        CHECK(isSubtype(a, b));
     CHECK(!isSubtype(b, a));
     CHECK(isConsistentSubtype(b, a));
 }
@@ -249,7 +258,10 @@ TEST_CASE_FIXTURE(IsSubtypeFixture, "tables")
     TypeId c = requireType("c");
     TypeId d = requireType("d");
 
-    CHECK(isSubtype(a, b));
+    if (FFlag::DebugLuauDeferredConstraintResolution)
+        CHECK(!isSubtype(a, b)); // table properties are invariant
+    else
+        CHECK(isSubtype(a, b));
     CHECK(!isSubtype(b, a));
     CHECK(isConsistentSubtype(b, a));
 
@@ -259,7 +271,10 @@ TEST_CASE_FIXTURE(IsSubtypeFixture, "tables")
     CHECK(isSubtype(d, a));
     CHECK(!isSubtype(a, d));
 
-    CHECK(isSubtype(d, b));
+    if (FFlag::DebugLuauDeferredConstraintResolution)
+        CHECK(!isSubtype(d, b)); // table properties are invariant
+    else
+        CHECK(isSubtype(d, b));
     CHECK(!isSubtype(b, d));
 }
 
@@ -516,6 +531,71 @@ struct NormalizeFixture : Fixture
 
 TEST_SUITE_BEGIN("Normalize");
 
+TEST_CASE_FIXTURE(NormalizeFixture, "string_intersection_is_commutative")
+{
+    auto c4 = toString(normal(R"(
+        string & (string & Not<"a"> & Not<"b">)
+)"));
+    auto c4Reverse = toString(normal(R"(
+        (string & Not<"a"> & Not<"b">) & string
+)"));
+    CHECK(c4 == c4Reverse);
+    CHECK_EQ("string & ~\"a\" & ~\"b\"", c4);
+
+    auto c5 = toString(normal(R"(
+        (string & Not<"a"> & Not<"b">) & (string & Not<"b"> & Not<"c">)
+)"));
+    auto c5Reverse = toString(normal(R"(
+        (string & Not<"b"> & Not<"c">) & (string & Not<"a"> & Not<"c">)
+)"));
+    CHECK(c5 == c5Reverse);
+    CHECK_EQ("string & ~\"a\" & ~\"b\" & ~\"c\"", c5);
+
+    auto c6 = toString(normal(R"(
+        ("a" | "b") & (string & Not<"b"> & Not<"c">)
+)"));
+    auto c6Reverse = toString(normal(R"(
+        (string & Not<"b"> & Not<"c">) & ("a" | "b")
+)"));
+    CHECK(c6 == c6Reverse);
+    CHECK_EQ("\"a\"", c6);
+
+    auto c7 = toString(normal(R"(
+        string & ("b" | "c")
+)"));
+    auto c7Reverse = toString(normal(R"(
+        ("b" | "c") & string
+)"));
+    CHECK(c7 == c7Reverse);
+    CHECK_EQ("\"b\" | \"c\"", c7);
+
+    auto c8 = toString(normal(R"(
+(string & Not<"a"> & Not<"b">) & ("b" | "c")
+)"));
+    auto c8Reverse = toString(normal(R"(
+        ("b" | "c") & (string & Not<"a"> & Not<"b">)
+)"));
+    CHECK(c8 == c8Reverse);
+    CHECK_EQ("\"c\"", c8);
+    auto c9 = toString(normal(R"(
+            ("a" | "b") & ("b" | "c")
+    )"));
+    auto c9Reverse = toString(normal(R"(
+            ("b" | "c") & ("a" | "b")
+    )"));
+    CHECK(c9 == c9Reverse);
+    CHECK_EQ("\"b\"", c9);
+
+    auto l = toString(normal(R"(
+         (string | number) & ("a" | true)
+    )"));
+    auto r = toString(normal(R"(
+         ("a" | true) & (string | number)
+    )"));
+    CHECK(l == r);
+    CHECK_EQ("\"a\"", l);
+}
+
 TEST_CASE_FIXTURE(NormalizeFixture, "negate_string")
 {
     CHECK("number" == toString(normal(R"(
@@ -640,6 +720,19 @@ TEST_CASE_FIXTURE(NormalizeFixture, "specific_functions_cannot_be_negated")
     CHECK(nullptr == toNormalizedType("Not<(boolean) -> boolean>"));
 }
 
+TEST_CASE_FIXTURE(NormalizeFixture, "trivial_intersection_inhabited")
+{
+    // this test was used to fix a bug in normalization when working with intersections/unions of the same type.
+
+    TypeId a = arena.addType(FunctionType{builtinTypes->emptyTypePack, builtinTypes->anyTypePack, std::nullopt, false});
+    TypeId c = arena.addType(IntersectionType{{a, a}});
+
+    const NormalizedType* n = normalizer.normalize(c);
+    REQUIRE(n);
+
+    CHECK(normalizer.isInhabited(n));
+}
+
 TEST_CASE_FIXTURE(NormalizeFixture, "bare_negated_boolean")
 {
     // TODO: We don't yet have a way to say number | string | thread | nil | Class | Table | Function
@@ -732,7 +825,41 @@ TEST_CASE_FIXTURE(NormalizeFixture, "narrow_union_of_classes_with_intersection")
 
 TEST_CASE_FIXTURE(NormalizeFixture, "intersection_of_metatables_where_the_metatable_is_top_or_bottom")
 {
-    CHECK("{ @metatable *error-type*, {|  |} }" == toString(normal("Mt<{}, any> & Mt<{}, err>")));
+    if (FFlag::DebugLuauDeferredConstraintResolution)
+        CHECK("{ @metatable *error-type*, {  } }" == toString(normal("Mt<{}, any> & Mt<{}, err>")));
+    else
+        CHECK("{ @metatable *error-type*, {|  |} }" == toString(normal("Mt<{}, any> & Mt<{}, err>")));
+}
+
+TEST_CASE_FIXTURE(NormalizeFixture, "recurring_intersection")
+{
+    CheckResult result = check(R"(
+        type A = any?
+        type B = A & A
+    )");
+
+    std::optional<TypeId> t = lookupType("B");
+    REQUIRE(t);
+
+    const NormalizedType* nt = normalizer.normalize(*t);
+    REQUIRE(nt);
+
+    CHECK("any" == toString(normalizer.typeFromNormal(*nt)));
+}
+
+TEST_CASE_FIXTURE(NormalizeFixture, "cyclic_union")
+{
+    ScopedFastFlag sff{"LuauNormalizeCyclicUnions", true};
+
+    // T where T = any & (number | T)
+    TypeId t = arena.addType(BlockedType{});
+    TypeId u = arena.addType(UnionType{{builtinTypes->numberType, t}});
+    asMutable(t)->ty.emplace<IntersectionType>(IntersectionType{{builtinTypes->anyType, u}});
+
+    const NormalizedType* nt = normalizer.normalize(t);
+    REQUIRE(nt);
+
+    CHECK("number" == toString(normalizer.typeFromNormal(*nt)));
 }
 
 TEST_CASE_FIXTURE(NormalizeFixture, "crazy_metatable")
@@ -767,7 +894,10 @@ TEST_CASE_FIXTURE(NormalizeFixture, "classes_and_never")
 TEST_CASE_FIXTURE(NormalizeFixture, "top_table_type")
 {
     CHECK("table" == toString(normal("{} | tbl")));
-    CHECK("{|  |}" == toString(normal("{} & tbl")));
+    if (FFlag::DebugLuauDeferredConstraintResolution)
+        CHECK("{  }" == toString(normal("{} & tbl")));
+    else
+        CHECK("{|  |}" == toString(normal("{} & tbl")));
     CHECK("never" == toString(normal("number & tbl")));
 }
 
@@ -780,10 +910,6 @@ TEST_CASE_FIXTURE(NormalizeFixture, "negations_of_tables")
 
 TEST_CASE_FIXTURE(NormalizeFixture, "normalize_blocked_types")
 {
-    ScopedFastFlag sff[]{
-        {"LuauNormalizeBlockedTypes", true},
-    };
-
     Type blocked{BlockedType{}};
 
     const NormalizedType* norm = normalizer.normalize(&blocked);
@@ -791,14 +917,29 @@ TEST_CASE_FIXTURE(NormalizeFixture, "normalize_blocked_types")
     CHECK_EQ(normalizer.typeFromNormal(*norm), &blocked);
 }
 
-TEST_CASE_FIXTURE(NormalizeFixture, "normalize_pending_expansion_types")
+TEST_CASE_FIXTURE(NormalizeFixture, "normalize_is_exactly_number")
 {
-    AstName name;
-    Type pending{PendingExpansionType{std::nullopt, name, {}, {}}};
+    const NormalizedType* number = normalizer.normalize(builtinTypes->numberType);
+    // 1. all types for which Types::number say true for, NormalizedType::isExactlyNumber should say true as well
+    CHECK(Luau::isNumber(builtinTypes->numberType) == number->isExactlyNumber());
+    // 2. isExactlyNumber should handle cases like `number & number`
+    TypeId intersection = arena.addType(IntersectionType{{builtinTypes->numberType, builtinTypes->numberType}});
+    const NormalizedType* normIntersection = normalizer.normalize(intersection);
+    CHECK(normIntersection->isExactlyNumber());
 
-    const NormalizedType* norm = normalizer.normalize(&pending);
+    // 3. isExactlyNumber should reject things that are definitely not precisely numbers `number | any`
 
-    CHECK_EQ(normalizer.typeFromNormal(*norm), &pending);
+    TypeId yoonion = arena.addType(UnionType{{builtinTypes->anyType, builtinTypes->numberType}});
+    const NormalizedType* unionIntersection = normalizer.normalize(yoonion);
+    CHECK(!unionIntersection->isExactlyNumber());
+}
+
+TEST_CASE_FIXTURE(NormalizeFixture, "normalize_unknown")
+{
+    auto nt = toNormalizedType("Not<string> | Not<number>");
+    CHECK(nt);
+    CHECK(nt->isUnknown());
+    CHECK(toString(normalizer.typeFromNormal(*nt)) == "unknown");
 }
 
 TEST_SUITE_END();

@@ -8,6 +8,8 @@
 
 using namespace Luau;
 
+LUAU_FASTFLAG(DebugLuauDeferredConstraintResolution);
+
 TEST_SUITE_BEGIN("UnionTypes");
 
 TEST_CASE_FIXTURE(Fixture, "return_types_can_be_disjoint")
@@ -220,9 +222,9 @@ TEST_CASE_FIXTURE(Fixture, "union_equality_comparisons")
         type B = number | nil
         type C = number | boolean
 
-        local a: A = 1
-        local b: B = nil
-        local c: C = true
+        local a = 1 :: A
+        local b = nil :: B
+        local c = true :: C
         local n = 1
 
         local x = a == b
@@ -354,7 +356,10 @@ a.x = 2
 
     LUAU_REQUIRE_ERROR_COUNT(1, result);
     auto s = toString(result.errors[0]);
-    CHECK_EQ("Value of type '({| x: number |} & {| y: number |})?' could be nil", s);
+    if (FFlag::DebugLuauDeferredConstraintResolution)
+        CHECK_EQ("Value of type '({ x: number } & { y: number })?' could be nil", s);
+    else
+        CHECK_EQ("Value of type '({| x: number |} & {| y: number |})?' could be nil", s);
 }
 
 TEST_CASE_FIXTURE(Fixture, "optional_length_error")
@@ -469,9 +474,20 @@ local b: { w: number } = a
     )");
 
     LUAU_REQUIRE_ERROR_COUNT(1, result);
-    CHECK_EQ(toString(result.errors[0]), R"(Type 'X | Y | Z' could not be converted into '{| w: number |}'
-caused by:
-  Not all union options are compatible. Table type 'X' not compatible with type '{| w: number |}' because the former is missing field 'w')");
+    TypeMismatch* tm = get<TypeMismatch>(result.errors[0]);
+    REQUIRE(tm);
+
+    CHECK_EQ(tm->reason, "Not all union options are compatible.");
+
+    CHECK_EQ("X | Y | Z", toString(tm->givenType));
+
+    const TableType* expected = get<TableType>(tm->wantedType);
+    REQUIRE(expected);
+    CHECK_EQ(TableState::Sealed, expected->state);
+    CHECK_EQ(1, expected->props.size());
+    auto propW = expected->props.find("w");
+    REQUIRE_NE(expected->props.end(), propW);
+    CHECK_EQ("number", toString(propW->second.type()));
 }
 
 TEST_CASE_FIXTURE(Fixture, "error_detailed_union_all")
@@ -499,9 +515,11 @@ local a: X? = { w = 4 }
     )");
 
     LUAU_REQUIRE_ERROR_COUNT(1, result);
-    CHECK_EQ(toString(result.errors[0]), R"(Type 'a' could not be converted into 'X?'
+    const std::string expected = R"(Type 'a' could not be converted into 'X?'
 caused by:
-  None of the union options are compatible. For example: Table type 'a' not compatible with type 'X' because the former is missing field 'x')");
+  None of the union options are compatible. For example:
+Table type 'a' not compatible with type 'X' because the former is missing field 'x')";
+    CHECK_EQ(expected, toString(result.errors[0]));
 }
 
 // We had a bug where a cyclic union caused a stack overflow.
@@ -522,6 +540,7 @@ TEST_CASE_FIXTURE(Fixture, "dont_allow_cyclic_unions_to_be_inferred")
 
 TEST_CASE_FIXTURE(BuiltinsFixture, "table_union_write_indirect")
 {
+
     CheckResult result = check(R"(
         type A = { x: number, y: (number) -> string } | { z: number, y: (number) -> string }
 
@@ -538,8 +557,11 @@ TEST_CASE_FIXTURE(BuiltinsFixture, "table_union_write_indirect")
 
     LUAU_REQUIRE_ERROR_COUNT(1, result);
     // NOTE: union normalization will improve this message
-    CHECK_EQ(toString(result.errors[0]),
-        R"(Type '(string) -> number' could not be converted into '((number) -> string) | ((number) -> string)'; none of the union options are compatible)");
+    const std::string expected = R"(Type
+    '(string) -> number'
+could not be converted into
+    '((number) -> string) | ((number) -> string)'; none of the union options are compatible)";
+    CHECK_EQ(expected, toString(result.errors[0]));
 }
 
 TEST_CASE_FIXTURE(Fixture, "union_true_and_false")
@@ -613,8 +635,11 @@ TEST_CASE_FIXTURE(Fixture, "union_of_functions_mentioning_generic_typepacks")
      )");
 
     LUAU_REQUIRE_ERROR_COUNT(1, result);
-    CHECK_EQ(toString(result.errors[0]), "Type '(number, a...) -> (number?, a...)' could not be converted into '((number) -> number) | ((number?, "
-                                         "a...) -> (number?, a...))'; none of the union options are compatible");
+    const std::string expected = R"(Type
+    '(number, a...) -> (number?, a...)'
+could not be converted into
+    '((number) -> number) | ((number?, a...) -> (number?, a...))'; none of the union options are compatible)";
+    CHECK_EQ(expected, toString(result.errors[0]));
 }
 
 TEST_CASE_FIXTURE(Fixture, "union_of_functions_with_mismatching_arg_arities")
@@ -626,12 +651,16 @@ TEST_CASE_FIXTURE(Fixture, "union_of_functions_with_mismatching_arg_arities")
      )");
 
     LUAU_REQUIRE_ERROR_COUNT(1, result);
-    CHECK_EQ(toString(result.errors[0]), "Type '(number) -> number?' could not be converted into '((number) -> nil) | ((number, string?) -> "
-                                         "number)'; none of the union options are compatible");
+    const std::string expected = R"(Type
+    '(number) -> number?'
+could not be converted into
+    '((number) -> nil) | ((number, string?) -> number)'; none of the union options are compatible)";
+    CHECK_EQ(expected, toString(result.errors[0]));
 }
 
 TEST_CASE_FIXTURE(Fixture, "union_of_functions_with_mismatching_result_arities")
 {
+
     CheckResult result = check(R"(
         local x : () -> (number | string)
         local y : (() -> number) | (() -> string) = x -- OK
@@ -639,12 +668,16 @@ TEST_CASE_FIXTURE(Fixture, "union_of_functions_with_mismatching_result_arities")
      )");
 
     LUAU_REQUIRE_ERROR_COUNT(1, result);
-    CHECK_EQ(toString(result.errors[0]), "Type '() -> number | string' could not be converted into '(() -> (string, string)) | (() -> number)'; none "
-                                         "of the union options are compatible");
+    const std::string expected = R"(Type
+    '() -> number | string'
+could not be converted into
+    '(() -> (string, string)) | (() -> number)'; none of the union options are compatible)";
+    CHECK_EQ(expected, toString(result.errors[0]));
 }
 
 TEST_CASE_FIXTURE(Fixture, "union_of_functions_with_variadics")
 {
+
     CheckResult result = check(R"(
         local x : (...nil) -> (...number?)
         local y : ((...string?) -> (...number)) | ((...number?) -> nil) = x -- OK
@@ -652,12 +685,16 @@ TEST_CASE_FIXTURE(Fixture, "union_of_functions_with_variadics")
      )");
 
     LUAU_REQUIRE_ERROR_COUNT(1, result);
-    CHECK_EQ(toString(result.errors[0]), "Type '(...nil) -> (...number?)' could not be converted into '((...string?) -> (...number)) | ((...string?) "
-                                         "-> nil)'; none of the union options are compatible");
+    const std::string expected = R"(Type
+    '(...nil) -> (...number?)'
+could not be converted into
+    '((...string?) -> (...number)) | ((...string?) -> nil)'; none of the union options are compatible)";
+    CHECK_EQ(expected, toString(result.errors[0]));
 }
 
 TEST_CASE_FIXTURE(Fixture, "union_of_functions_with_mismatching_arg_variadics")
 {
+
     CheckResult result = check(R"(
         local x : (number) -> ()
         local y : ((number?) -> ()) | ((...number) -> ()) = x -- OK
@@ -665,12 +702,16 @@ TEST_CASE_FIXTURE(Fixture, "union_of_functions_with_mismatching_arg_variadics")
      )");
 
     LUAU_REQUIRE_ERROR_COUNT(1, result);
-    CHECK_EQ(toString(result.errors[0]),
-        "Type '(number) -> ()' could not be converted into '((...number?) -> ()) | ((number?) -> ())'; none of the union options are compatible");
+    const std::string expected = R"(Type
+    '(number) -> ()'
+could not be converted into
+    '((...number?) -> ()) | ((number?) -> ())'; none of the union options are compatible)";
+    CHECK_EQ(expected, toString(result.errors[0]));
 }
 
 TEST_CASE_FIXTURE(Fixture, "union_of_functions_with_mismatching_result_variadics")
 {
+
     CheckResult result = check(R"(
         local x : () -> (number?, ...number)
         local y : (() -> (...number)) | (() -> nil) = x -- OK
@@ -678,8 +719,11 @@ TEST_CASE_FIXTURE(Fixture, "union_of_functions_with_mismatching_result_variadics
      )");
 
     LUAU_REQUIRE_ERROR_COUNT(1, result);
-    CHECK_EQ(toString(result.errors[0]), "Type '() -> (number?, ...number)' could not be converted into '(() -> (...number)) | (() -> number)'; none "
-                                         "of the union options are compatible");
+    const std::string expected = R"(Type
+    '() -> (number?, ...number)'
+could not be converted into
+    '(() -> (...number)) | (() -> number)'; none of the union options are compatible)";
+    CHECK_EQ(expected, toString(result.errors[0]));
 }
 
 TEST_CASE_FIXTURE(Fixture, "less_greedy_unification_with_union_types")
@@ -712,7 +756,10 @@ TEST_CASE_FIXTURE(Fixture, "less_greedy_unification_with_union_types_2")
 
     LUAU_REQUIRE_NO_ERRORS(result);
 
-    CHECK_EQ("({| x: number |} | {| x: string |}) -> number | string", toString(requireType("f")));
+    if (FFlag::DebugLuauDeferredConstraintResolution)
+        CHECK_EQ("({ x: number } | { x: string }) -> number | string", toString(requireType("f")));
+    else
+        CHECK_EQ("({| x: number |} | {| x: string |}) -> number | string", toString(requireType("f")));
 }
 
 TEST_CASE_FIXTURE(Fixture, "union_table_any_property")
@@ -789,126 +836,17 @@ TEST_CASE_FIXTURE(Fixture, "lookup_prop_of_intersection_containing_unions")
     CHECK("variables" == unknownProp->key);
 }
 
-TEST_CASE_FIXTURE(Fixture, "free_options_can_be_unified_together")
+TEST_CASE_FIXTURE(Fixture, "suppress_errors_for_prop_lookup_of_a_union_that_includes_error")
 {
-    ScopedFastFlag sff[] = {
-        {"LuauTransitiveSubtyping", true},
-        {"LuauUnifyTwoOptions", true}
-    };
+    ScopedFastFlag sff{"DebugLuauDeferredConstraintResolution", true};
 
-    TypeArena arena;
-    TypeId nilType = builtinTypes->nilType;
-
-    std::unique_ptr scope = std::make_unique<Scope>(builtinTypes->anyTypePack);
-
-    TypeId free1 = arena.addType(FreeType{scope.get()});
-    TypeId option1 = arena.addType(UnionType{{nilType, free1}});
-
-    TypeId free2 = arena.addType(FreeType{scope.get()});
-    TypeId option2 = arena.addType(UnionType{{nilType, free2}});
-
-    InternalErrorReporter iceHandler;
-    UnifierSharedState sharedState{&iceHandler};
-    Normalizer normalizer{&arena, builtinTypes, NotNull{&sharedState}};
-    Unifier u{NotNull{&normalizer}, Mode::Strict, NotNull{scope.get()}, Location{}, Variance::Covariant};
-
-    u.tryUnify(option1, option2);
-
-    CHECK(!u.failure);
-
-    u.log.commit();
-
-    ToStringOptions opts;
-    CHECK("a?" == toString(option1, opts));
-    CHECK("a?" == toString(option2, opts));
-}
-
-TEST_CASE_FIXTURE(Fixture, "unify_more_complex_unions_that_include_nil")
-{
-    CheckResult result = check(R"(
-        type Record = {prop: (string | boolean)?}
-
-        function concatPagination(prop: (string | boolean | nil)?): Record
-            return {prop = prop}
-        end
-    )");
-
-    LUAU_REQUIRE_NO_ERRORS(result);
-}
-
-TEST_CASE_FIXTURE(Fixture, "optional_class_instances_are_invariant")
-{
-    ScopedFastFlag sff[] = {
-        {"LuauUnifyTwoOptions", true},
-        {"LuauTypeMismatchInvarianceInError", true}
-    };
-
-    createSomeClasses(&frontend);
+    registerHiddenTypes(&frontend);
 
     CheckResult result = check(R"(
-        function foo(ref: {current: Parent?})
-        end
+        local a = 5 :: err | Not<nil>
 
-        function bar(ref: {current: Child?})
-            foo(ref)
-        end
+        local b = a.foo
     )");
-
-    LUAU_REQUIRE_ERROR_COUNT(1, result);
-
-    // The last line of this error is the most important part.  We need to
-    // communicate that this is an invariant context.
-    std::string expectedError =
-        "Type '{| current: Child? |}' could not be converted into '{| current: Parent? |}'\n"
-        "caused by:\n"
-        "  Property 'current' is not compatible. Type 'Child' could not be converted into 'Parent' in an invariant context"
-    ;
-
-    CHECK(expectedError == toString(result.errors[0]));
-}
-
-TEST_CASE_FIXTURE(BuiltinsFixture, "luau-polyfill.Map.entries")
-{
-
-    fileResolver.source["Module/Map"] = R"(
---!strict
-
-type Object = { [any]: any }
-type Array<T> = { [number]: T }
-type Table<T, V> = { [T]: V }
-type Tuple<T, V> = Array<T | V>
-
-local Map = {}
-
-export type Map<K, V> = {
-	size: number,
-	-- method definitions
-	set: (self: Map<K, V>, K, V) -> Map<K, V>,
-	get: (self: Map<K, V>, K) -> V | nil,
-	clear: (self: Map<K, V>) -> (),
-	delete: (self: Map<K, V>, K) -> boolean,
-	has: (self: Map<K, V>, K) -> boolean,
-	keys: (self: Map<K, V>) -> Array<K>,
-	values: (self: Map<K, V>) -> Array<V>,
-	entries: (self: Map<K, V>) -> Array<Tuple<K, V>>,
-	ipairs: (self: Map<K, V>) -> any,
-	[K]: V,
-	_map: { [K]: V },
-	_array: { [number]: K },
-}
-
-function Map:entries()
-	return {}
-end
-
-local function coerceToTable(mapLike: Map<any, any> | Table<any, any>): Array<Tuple<any, any>>
-    local e = mapLike:entries();
-    return e
-end
-
-    )";
-
-    CheckResult result = frontend.check("Module/Map");
 
     LUAU_REQUIRE_NO_ERRORS(result);
 }

@@ -4,8 +4,8 @@
 #include "Luau/Ast.h" // Used for some of the enumerations
 #include "Luau/DenseHash.h"
 #include "Luau/NotNull.h"
-#include "Luau/Type.h"
 #include "Luau/Variant.h"
+#include "Luau/TypeFwd.h"
 
 #include <string>
 #include <memory>
@@ -15,12 +15,6 @@ namespace Luau
 {
 
 struct Scope;
-
-struct Type;
-using TypeId = const Type*;
-
-struct TypePackVar;
-using TypePackId = const TypePackVar*;
 
 // subType <: superType
 struct SubtypeConstraint
@@ -34,6 +28,11 @@ struct PackSubtypeConstraint
 {
     TypePackId subPack;
     TypePackId superPack;
+
+    // HACK!! TODO clip.
+    // We need to know which of `PackSubtypeConstraint` are emitted from `AstStatReturn` vs any others.
+    // Then we force these specific `PackSubtypeConstraint` to only dispatch in the order of the `return`s.
+    bool returns = false;
 };
 
 // generalizedType ~ gen sourceType
@@ -50,37 +49,15 @@ struct InstantiationConstraint
     TypeId superType;
 };
 
-struct UnaryConstraint
-{
-    AstExprUnary::Op op;
-    TypeId operandType;
-    TypeId resultType;
-};
-
-// let L : leftType
-// let R : rightType
-// in
-//     L op R : resultType
-struct BinaryConstraint
-{
-    AstExprBinary::Op op;
-    TypeId leftType;
-    TypeId rightType;
-    TypeId resultType;
-
-    // When we dispatch this constraint, we update the key at this map to record
-    // the overload that we selected.
-    const AstNode* astFragment;
-    DenseHashMap<const AstNode*, TypeId>* astOriginalCallTypes;
-    DenseHashMap<const AstNode*, TypeId>* astOverloadResolvedTypes;
-};
-
 // iteratee is iterable
 // iterators is the iteration types.
 struct IterableConstraint
 {
     TypePackId iterator;
     TypePackId variables;
+
+    const AstNode* nextAstFragment;
+    DenseHashMap<const AstNode*, TypeId>* astForInNextTypes;
 };
 
 // name(namedType) = name
@@ -105,13 +82,12 @@ struct FunctionCallConstraint
     TypeId fn;
     TypePackId argsPack;
     TypePackId result;
-    class AstExprCall* callSite;
+    class AstExprCall* callSite = nullptr;
     std::vector<std::optional<TypeId>> discriminantTypes;
 
     // When we dispatch this constraint, we update the key at this map to record
     // the overload that we selected.
-    DenseHashMap<const AstNode*, TypeId>* astOriginalCallTypes;
-    DenseHashMap<const AstNode*, TypeId>* astOverloadResolvedTypes;
+    DenseHashMap<const AstNode*, TypeId>* astOverloadResolvedTypes = nullptr;
 };
 
 // result ~ prim ExpectedType SomeSingletonType MultitonType
@@ -234,6 +210,22 @@ struct RefineConstraint
     TypeId discriminant;
 };
 
+// resultType ~ T0 op T1 op ... op TN
+//
+// op is either union or intersection.  If any of the input types are blocked,
+// this constraint will block unless forced.
+struct SetOpConstraint
+{
+    enum
+    {
+        Intersection,
+        Union
+    } mode;
+
+    TypeId resultType;
+    std::vector<TypeId> types;
+};
+
 // ty ~ reduce ty
 //
 // Try to reduce ty, if it is a TypeFamilyInstanceType. Otherwise, do nothing.
@@ -250,10 +242,9 @@ struct ReducePackConstraint
     TypePackId tp;
 };
 
-using ConstraintV = Variant<SubtypeConstraint, PackSubtypeConstraint, GeneralizationConstraint, InstantiationConstraint, UnaryConstraint,
-    BinaryConstraint, IterableConstraint, NameConstraint, TypeAliasExpansionConstraint, FunctionCallConstraint, PrimitiveTypeConstraint,
-    HasPropConstraint, SetPropConstraint, SetIndexerConstraint, SingletonOrTopTypeConstraint, UnpackConstraint, RefineConstraint, ReduceConstraint,
-    ReducePackConstraint>;
+using ConstraintV = Variant<SubtypeConstraint, PackSubtypeConstraint, GeneralizationConstraint, InstantiationConstraint, IterableConstraint,
+    NameConstraint, TypeAliasExpansionConstraint, FunctionCallConstraint, PrimitiveTypeConstraint, HasPropConstraint, SetPropConstraint,
+    SetIndexerConstraint, SingletonOrTopTypeConstraint, UnpackConstraint, RefineConstraint, SetOpConstraint, ReduceConstraint, ReducePackConstraint>;
 
 struct Constraint
 {
@@ -267,6 +258,8 @@ struct Constraint
     ConstraintV c;
 
     std::vector<NotNull<Constraint>> dependencies;
+
+    DenseHashSet<TypeId> getFreeTypes() const;
 };
 
 using ConstraintPtr = std::unique_ptr<Constraint>;

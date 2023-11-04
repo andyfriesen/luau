@@ -1,7 +1,10 @@
 // This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 #pragma once
 
+#include "Luau/Common.h"
+
 #include <bitset>
+#include <queue>
 #include <utility>
 #include <vector>
 
@@ -17,7 +20,7 @@ struct IrFunction;
 
 void updateUseCounts(IrFunction& function);
 
-void updateLastUseLocations(IrFunction& function);
+void updateLastUseLocations(IrFunction& function, const std::vector<uint32_t>& sortedBlocks);
 
 uint32_t getNextInstUse(IrFunction& function, uint32_t targetInstIdx, uint32_t startInstIdx);
 
@@ -37,6 +40,16 @@ struct RegisterSet
 
 void requireVariadicSequence(RegisterSet& sourceRs, const RegisterSet& defRs, uint8_t varargStart);
 
+struct BlockOrdering
+{
+    uint32_t depth = 0;
+
+    uint32_t preOrder = ~0u;
+    uint32_t postOrder = ~0u;
+
+    bool visited = false;
+};
+
 struct CfgInfo
 {
     std::vector<uint32_t> predecessors;
@@ -44,6 +57,15 @@ struct CfgInfo
 
     std::vector<uint32_t> successors;
     std::vector<uint32_t> successorsOffsets;
+
+    // Immediate dominators (unique parent in the dominator tree)
+    std::vector<uint32_t> idoms;
+
+    // Children in the dominator tree
+    std::vector<uint32_t> domChildren;
+    std::vector<uint32_t> domChildrenOffsets;
+
+    std::vector<BlockOrdering> domOrdering;
 
     // VM registers that are live when the block is entered
     // Additionally, an active variadic sequence can exist at the entry of the block
@@ -64,6 +86,58 @@ struct CfgInfo
     RegisterSet captured;
 };
 
+// A quick refresher on dominance and dominator trees:
+// * If A is a dominator of B (A dom B), you can never execute B without executing A first
+// * A is a strict dominator of B (A sdom B) is similar to previous one but A != B
+// * Immediate dominator node N (idom N) is a unique node T so that T sdom N,
+//   but T does not strictly dominate any other node that dominates N.
+// * Dominance frontier is a set of nodes where dominance of a node X ends.
+//   In practice this is where values established by node X might no longer hold because of join edges from other nodes coming in.
+//   This is also where PHI instructions in SSA are placed.
+void computeCfgImmediateDominators(IrFunction& function);
+void computeCfgDominanceTreeChildren(IrFunction& function);
+
+struct IdfContext
+{
+    struct BlockAndOrdering
+    {
+        uint32_t blockIdx;
+        BlockOrdering ordering;
+
+        bool operator<(const BlockAndOrdering& rhs) const
+        {
+            if (ordering.depth != rhs.ordering.depth)
+                return ordering.depth < rhs.ordering.depth;
+
+            return ordering.preOrder < rhs.ordering.preOrder;
+        }
+    };
+
+    // Using priority queue to work on nodes in the order from the bottom of the dominator tree to the top
+    // If the depth of keys is equal, DFS order is used to provide strong ordering
+    std::priority_queue<BlockAndOrdering> queue;
+    std::vector<uint32_t> worklist;
+
+    struct IdfVisitMarks
+    {
+        bool seenInQueue = false;
+        bool seenInWorklist = false;
+    };
+
+    std::vector<IdfVisitMarks> visits;
+
+    std::vector<uint32_t> idf;
+};
+
+// Compute iterated dominance frontier (IDF or DF+) for a variable, given the set of blocks where that variable is defined
+// Providing a set of blocks where the variable is a live-in at the entry helps produce a pruned SSA form (inserted phi nodes will not be dead)
+//
+// 'Iterated' comes from the definition where we recompute the IDFn+1 = DF(S) while adding IDFn to S until a fixed point is reached
+// Iterated dominance frontier has been shown to be equal to the set of nodes where phi instructions have to be inserted
+void computeIteratedDominanceFrontierForDefs(
+    IdfContext& ctx, const IrFunction& function, const std::vector<uint32_t>& defBlocks, const std::vector<uint32_t>& liveInBlocks);
+
+// Function used to update all CFG data
 void computeCfgInfo(IrFunction& function);
 
 struct BlockIteratorWrapper
@@ -90,10 +164,17 @@ struct BlockIteratorWrapper
     {
         return itEnd;
     }
+
+    uint32_t operator[](size_t pos) const
+    {
+        LUAU_ASSERT(pos < size_t(itEnd - itBegin));
+        return itBegin[pos];
+    }
 };
 
 BlockIteratorWrapper predecessors(const CfgInfo& cfg, uint32_t blockIdx);
 BlockIteratorWrapper successors(const CfgInfo& cfg, uint32_t blockIdx);
+BlockIteratorWrapper domChildren(const CfgInfo& cfg, uint32_t blockIdx);
 
 } // namespace CodeGen
 } // namespace Luau

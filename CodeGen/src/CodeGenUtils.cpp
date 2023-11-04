@@ -1,8 +1,6 @@
 // This file is part of the Luau programming language and is licensed under MIT License; see LICENSE.txt for details
 #include "CodeGenUtils.h"
 
-#include "CustomExecUtils.h"
-
 #include "lvm.h"
 
 #include "lbuiltins.h"
@@ -18,8 +16,6 @@
 #include "ltable.h"
 
 #include <string.h>
-
-LUAU_FASTFLAG(LuauUniformTopHandling)
 
 // All external function calls that can cause stack realloc or Lua calls have to be wrapped in VM_PROTECT
 // This makes sure that we save the pc (in case the Lua call needs to generate a backtrace) before the call,
@@ -268,7 +264,7 @@ Closure* callFallback(lua_State* L, StkId ra, StkId argtop, int nresults)
         ci->savedpc = p->code;
 
         if (LUAU_LIKELY(p->execdata != NULL))
-            ci->flags = LUA_CALLINFO_CUSTOM;
+            ci->flags = LUA_CALLINFO_NATIVE;
 
         return ccl;
     }
@@ -279,7 +275,7 @@ Closure* callFallback(lua_State* L, StkId ra, StkId argtop, int nresults)
 
         // yield
         if (n < 0)
-            return NULL;
+            return (Closure*)CALL_FALLBACK_YIELD;
 
         // ci is our callinfo, cip is our parent
         CallInfo* ci = L->ci;
@@ -303,47 +299,8 @@ Closure* callFallback(lua_State* L, StkId ra, StkId argtop, int nresults)
         L->top = (nresults == LUA_MULTRET) ? res : cip->top;
 
         // keep executing current function
-        LUAU_ASSERT(isLua(cip));
-        return clvalue(cip->func);
-    }
-}
-
-// Extracted as-is from lvmexecute.cpp with the exception of control flow (reentry) and removed interrupts
-Closure* returnFallback(lua_State* L, StkId ra, StkId valend)
-{
-    // ci is our callinfo, cip is our parent
-    CallInfo* ci = L->ci;
-    CallInfo* cip = ci - 1;
-
-    StkId res = ci->func; // note: we assume CALL always puts func+args and expects results to start at func
-    StkId vali = ra;
-
-    int nresults = ci->nresults;
-
-    // copy return values into parent stack (but only up to nresults!), fill the rest with nil
-    // note: in MULTRET context nresults starts as -1 so i != 0 condition never activates intentionally
-    int i;
-    for (i = nresults; i != 0 && vali < valend; i--)
-        setobj2s(L, res++, vali++);
-    while (i-- > 0)
-        setnilvalue(res++);
-
-    // pop the stack frame
-    L->ci = cip;
-    L->base = cip->base;
-    L->top = (nresults == LUA_MULTRET) ? res : cip->top;
-
-    // we're done!
-    if (LUAU_UNLIKELY(ci->flags & LUA_CALLINFO_RETURN))
-    {
-        if (!FFlag::LuauUniformTopHandling)
-            L->top = res;
         return NULL;
     }
-
-    // keep executing new function
-    LUAU_ASSERT(isLua(cip));
-    return clvalue(cip->func);
 }
 
 const Instruction* executeGETGLOBAL(lua_State* L, const Instruction* pc, StkId base, TValue* k)
@@ -407,16 +364,9 @@ const Instruction* executeGETTABLEKS(lua_State* L, const Instruction* pc, StkId 
     {
         Table* h = hvalue(rb);
 
-        int slot = LUAU_INSN_C(insn) & h->nodemask8;
-        LuaNode* n = &h->node[slot];
+        // we ignore the fast path that checks for the cached slot since IrTranslation already checks for it.
 
-        // fast-path: value is in expected slot
-        if (LUAU_LIKELY(ttisstring(gkey(n)) && tsvalue(gkey(n)) == tsvalue(kv) && !ttisnil(gval(n))))
-        {
-            setobj2s(L, ra, gval(n));
-            return pc;
-        }
-        else if (!h->metatable)
+        if (!h->metatable)
         {
             // fast-path: value is not in expected slot, but the table lookup doesn't involve metatable
             const TValue* res = luaH_getstr(h, tsvalue(kv));
@@ -434,6 +384,7 @@ const Instruction* executeGETTABLEKS(lua_State* L, const Instruction* pc, StkId 
         else
         {
             // slow-path, may invoke Lua calls via __index metamethod
+            int slot = LUAU_INSN_C(insn) & h->nodemask8;
             L->cachedslot = slot;
             VM_PROTECT(luaV_gettable(L, rb, kv, ra));
             // save cachedslot to accelerate future lookups; patches currently executing instruction since pc-2 rolls back two pc++
@@ -525,17 +476,9 @@ const Instruction* executeSETTABLEKS(lua_State* L, const Instruction* pc, StkId 
     {
         Table* h = hvalue(rb);
 
-        int slot = LUAU_INSN_C(insn) & h->nodemask8;
-        LuaNode* n = &h->node[slot];
+        // we ignore the fast path that checks for the cached slot since IrTranslation already checks for it.
 
-        // fast-path: value is in expected slot
-        if (LUAU_LIKELY(ttisstring(gkey(n)) && tsvalue(gkey(n)) == tsvalue(kv) && !ttisnil(gval(n)) && !h->readonly))
-        {
-            setobj2t(L, gval(n), ra);
-            luaC_barriert(L, h, ra);
-            return pc;
-        }
-        else if (fastnotm(h->metatable, TM_NEWINDEX) && !h->readonly)
+        if (fastnotm(h->metatable, TM_NEWINDEX) && !h->readonly)
         {
             VM_PROTECT_PC(); // set may fail
 
@@ -550,6 +493,7 @@ const Instruction* executeSETTABLEKS(lua_State* L, const Instruction* pc, StkId 
         else
         {
             // slow-path, may invoke Lua calls via __newindex metamethod
+            int slot = LUAU_INSN_C(insn) & h->nodemask8;
             L->cachedslot = slot;
             VM_PROTECT(luaV_settable(L, rb, kv, ra));
             // save cachedslot to accelerate future lookups; patches currently executing instruction since pc-2 rolls back two pc++
@@ -587,50 +531,6 @@ const Instruction* executeSETTABLEKS(lua_State* L, const Instruction* pc, StkId 
     }
 }
 
-const Instruction* executeNEWCLOSURE(lua_State* L, const Instruction* pc, StkId base, TValue* k)
-{
-    [[maybe_unused]] Closure* cl = clvalue(L->ci->func);
-    Instruction insn = *pc++;
-    StkId ra = VM_REG(LUAU_INSN_A(insn));
-
-    Proto* pv = cl->l.p->p[LUAU_INSN_D(insn)];
-    LUAU_ASSERT(unsigned(LUAU_INSN_D(insn)) < unsigned(cl->l.p->sizep));
-
-    VM_PROTECT_PC(); // luaF_newLclosure may fail due to OOM
-
-    // note: we save closure to stack early in case the code below wants to capture it by value
-    Closure* ncl = luaF_newLclosure(L, pv->nups, cl->env, pv);
-    setclvalue(L, ra, ncl);
-
-    for (int ui = 0; ui < pv->nups; ++ui)
-    {
-        Instruction uinsn = *pc++;
-        LUAU_ASSERT(LUAU_INSN_OP(uinsn) == LOP_CAPTURE);
-
-        switch (LUAU_INSN_A(uinsn))
-        {
-        case LCT_VAL:
-            setobj(L, &ncl->l.uprefs[ui], VM_REG(LUAU_INSN_B(uinsn)));
-            break;
-
-        case LCT_REF:
-            setupvalue(L, &ncl->l.uprefs[ui], luaF_findupval(L, VM_REG(LUAU_INSN_B(uinsn))));
-            break;
-
-        case LCT_UPVAL:
-            setobj(L, &ncl->l.uprefs[ui], VM_UV(LUAU_INSN_B(uinsn)));
-            break;
-
-        default:
-            LUAU_ASSERT(!"Unknown upvalue capture type");
-            LUAU_UNREACHABLE(); // improves switch() codegen by eliding opcode bounds checks
-        }
-    }
-
-    VM_PROTECT(luaC_checkGC(L));
-    return pc;
-}
-
 const Instruction* executeNAMECALL(lua_State* L, const Instruction* pc, StkId base, TValue* k)
 {
     [[maybe_unused]] Closure* cl = clvalue(L->ci->func);
@@ -643,43 +543,19 @@ const Instruction* executeNAMECALL(lua_State* L, const Instruction* pc, StkId ba
 
     if (ttistable(rb))
     {
-        Table* h = hvalue(rb);
-        // note: we can't use nodemask8 here because we need to query the main position of the table, and 8-bit nodemask8 only works
-        // for predictive lookups
-        LuaNode* n = &h->node[tsvalue(kv)->hash & (sizenode(h) - 1)];
+        // note: lvmexecute.cpp version of NAMECALL has two fast paths, but both fast paths are inlined into IR
+        // as such, if we get here we can just use the generic path which makes the fallback path a little faster
 
-        const TValue* mt = 0;
-        const LuaNode* mtn = 0;
-
-        // fast-path: key is in the table in expected slot
-        if (ttisstring(gkey(n)) && tsvalue(gkey(n)) == tsvalue(kv) && !ttisnil(gval(n)))
-        {
-            // note: order of copies allows rb to alias ra+1 or ra
-            setobj2s(L, ra + 1, rb);
-            setobj2s(L, ra, gval(n));
-        }
-        // fast-path: key is absent from the base, table has an __index table, and it has the result in the expected slot
-        else if (gnext(n) == 0 && (mt = fasttm(L, hvalue(rb)->metatable, TM_INDEX)) && ttistable(mt) &&
-                 (mtn = &hvalue(mt)->node[LUAU_INSN_C(insn) & hvalue(mt)->nodemask8]) && ttisstring(gkey(mtn)) && tsvalue(gkey(mtn)) == tsvalue(kv) &&
-                 !ttisnil(gval(mtn)))
-        {
-            // note: order of copies allows rb to alias ra+1 or ra
-            setobj2s(L, ra + 1, rb);
-            setobj2s(L, ra, gval(mtn));
-        }
-        else
-        {
-            // slow-path: handles full table lookup
-            setobj2s(L, ra + 1, rb);
-            L->cachedslot = LUAU_INSN_C(insn);
-            VM_PROTECT(luaV_gettable(L, rb, kv, ra));
-            // save cachedslot to accelerate future lookups; patches currently executing instruction since pc-2 rolls back two pc++
-            VM_PATCH_C(pc - 2, L->cachedslot);
-            // recompute ra since stack might have been reallocated
-            ra = VM_REG(LUAU_INSN_A(insn));
-            if (ttisnil(ra))
-                luaG_methoderror(L, ra + 1, tsvalue(kv));
-        }
+        // slow-path: handles full table lookup
+        setobj2s(L, ra + 1, rb);
+        L->cachedslot = LUAU_INSN_C(insn);
+        VM_PROTECT(luaV_gettable(L, rb, kv, ra));
+        // save cachedslot to accelerate future lookups; patches currently executing instruction since pc-2 rolls back two pc++
+        VM_PATCH_C(pc - 2, L->cachedslot);
+        // recompute ra since stack might have been reallocated
+        ra = VM_REG(LUAU_INSN_A(insn));
+        if (ttisnil(ra))
+            luaG_methoderror(L, ra + 1, tsvalue(kv));
     }
     else
     {
@@ -836,34 +712,31 @@ const Instruction* executeFORGPREP(lua_State* L, const Instruction* pc, StkId ba
     return pc;
 }
 
-const Instruction* executeGETVARARGS(lua_State* L, const Instruction* pc, StkId base, TValue* k)
+void executeGETVARARGSMultRet(lua_State* L, const Instruction* pc, StkId base, int rai)
 {
     [[maybe_unused]] Closure* cl = clvalue(L->ci->func);
-    Instruction insn = *pc++;
-    int b = LUAU_INSN_B(insn) - 1;
     int n = cast_int(base - L->ci->func) - cl->l.p->numparams - 1;
 
-    if (b == LUA_MULTRET)
-    {
-        VM_PROTECT(luaD_checkstack(L, n));
-        StkId ra = VM_REG(LUAU_INSN_A(insn)); // previous call may change the stack
+    VM_PROTECT(luaD_checkstack(L, n));
+    StkId ra = VM_REG(rai); // previous call may change the stack
 
-        for (int j = 0; j < n; j++)
-            setobj2s(L, ra + j, base - n + j);
+    for (int j = 0; j < n; j++)
+        setobj2s(L, ra + j, base - n + j);
 
-        L->top = ra + n;
-        return pc;
-    }
-    else
-    {
-        StkId ra = VM_REG(LUAU_INSN_A(insn));
+    L->top = ra + n;
+}
 
-        for (int j = 0; j < b && j < n; j++)
-            setobj2s(L, ra + j, base - n + j);
-        for (int j = n; j < b; j++)
-            setnilvalue(ra + j);
-        return pc;
-    }
+void executeGETVARARGSConst(lua_State* L, StkId base, int rai, int b)
+{
+    [[maybe_unused]] Closure* cl = clvalue(L->ci->func);
+    int n = cast_int(base - L->ci->func) - cl->l.p->numparams - 1;
+
+    StkId ra = VM_REG(rai);
+
+    for (int j = 0; j < b && j < n; j++)
+        setobj2s(L, ra + j, base - n + j);
+    for (int j = n; j < b; j++)
+        setnilvalue(ra + j);
 }
 
 const Instruction* executeDUPCLOSURE(lua_State* L, const Instruction* pc, StkId base, TValue* k)

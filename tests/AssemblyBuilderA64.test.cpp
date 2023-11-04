@@ -76,6 +76,8 @@ TEST_CASE_FIXTURE(AssemblyBuilderA64Fixture, "Unary")
     SINGLE_COMPARE(clz(w0, w1), 0x5AC01020);
     SINGLE_COMPARE(rbit(x0, x1), 0xDAC00020);
     SINGLE_COMPARE(rbit(w0, w1), 0x5AC00020);
+    SINGLE_COMPARE(rev(w0, w1), 0x5AC00820);
+    SINGLE_COMPARE(rev(x0, x1), 0xDAC00C20);
 }
 
 TEST_CASE_FIXTURE(AssemblyBuilderA64Fixture, "Binary")
@@ -105,6 +107,13 @@ TEST_CASE_FIXTURE(AssemblyBuilderA64Fixture, "Binary")
     SINGLE_COMPARE(add(w3, w7, 78), 0x110138E3);
     SINGLE_COMPARE(sub(w3, w7, 78), 0x510138E3);
     SINGLE_COMPARE(cmp(w0, 42), 0x7100A81F);
+}
+
+TEST_CASE_FIXTURE(AssemblyBuilderA64Fixture, "BinaryExtended")
+{
+    // reg, reg
+    SINGLE_COMPARE(add(x0, x1, w2, 3), 0x8B224C20);
+    SINGLE_COMPARE(sub(x0, x1, w2, 3), 0xCB224C20);
 }
 
 TEST_CASE_FIXTURE(AssemblyBuilderA64Fixture, "BinaryImm")
@@ -455,6 +464,30 @@ TEST_CASE_FIXTURE(AssemblyBuilderA64Fixture, "Conditionals")
     SINGLE_COMPARE(cset(x1, ConditionA64::Less), 0x9A9FA7E1);
 }
 
+TEST_CASE_FIXTURE(AssemblyBuilderA64Fixture, "Undefined")
+{
+    SINGLE_COMPARE(udf(), 0x00000000);
+}
+
+TEST_CASE_FIXTURE(AssemblyBuilderA64Fixture, "PrePostIndexing")
+{
+    SINGLE_COMPARE(ldr(x0, mem(x1, 1)), 0xF8401020);
+    SINGLE_COMPARE(ldr(x0, mem(x1, 1, AddressKindA64::pre)), 0xF8401C20);
+    SINGLE_COMPARE(ldr(x0, mem(x1, 1, AddressKindA64::post)), 0xF8401420);
+
+    SINGLE_COMPARE(ldr(q0, mem(x1, 1)), 0x3CC01020);
+    SINGLE_COMPARE(ldr(q0, mem(x1, 1, AddressKindA64::pre)), 0x3CC01C20);
+    SINGLE_COMPARE(ldr(q0, mem(x1, 1, AddressKindA64::post)), 0x3CC01420);
+
+    SINGLE_COMPARE(str(x0, mem(x1, 1)), 0xF8001020);
+    SINGLE_COMPARE(str(x0, mem(x1, 1, AddressKindA64::pre)), 0xF8001C20);
+    SINGLE_COMPARE(str(x0, mem(x1, 1, AddressKindA64::post)), 0xF8001420);
+
+    SINGLE_COMPARE(str(q0, mem(x1, 1)), 0x3C801020);
+    SINGLE_COMPARE(str(q0, mem(x1, 1, AddressKindA64::pre)), 0x3C801C20);
+    SINGLE_COMPARE(str(q0, mem(x1, 1, AddressKindA64::post)), 0x3C801420);
+}
+
 TEST_CASE("LogTest")
 {
     AssemblyBuilderA64 build(/* logText= */ true);
@@ -496,6 +529,12 @@ TEST_CASE("LogTest")
 
     build.ubfx(x1, x2, 37, 5);
 
+    build.ldr(x0, mem(x1, 1));
+    build.ldr(x0, mem(x1, 1, AddressKindA64::pre));
+    build.ldr(x0, mem(x1, 1, AddressKindA64::post));
+
+    build.add(x1, x2, w3, 3);
+
     build.setLabel(l);
     build.ret();
 
@@ -529,6 +568,10 @@ TEST_CASE("LogTest")
  tbz         x0,#5,.L1
  fcvt        s1,d2
  ubfx        x1,x2,#3705
+ ldr         x0,[x1,#1]
+ ldr         x0,[x1,#1]!
+ ldr         x0,[x1]!,#1
+ add         x1,x2,w3 UXTW #3
 .L1:
  ret
 )";

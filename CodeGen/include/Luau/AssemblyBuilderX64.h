@@ -85,6 +85,7 @@ public:
     void test(OperandX64 lhs, OperandX64 rhs);
     void lea(OperandX64 lhs, OperandX64 rhs);
     void setcc(ConditionX64 cond, OperandX64 op);
+    void cmov(ConditionX64 cond, RegisterX64 lhs, OperandX64 rhs);
 
     void push(OperandX64 op);
     void pop(OperandX64 op);
@@ -98,10 +99,14 @@ public:
     void call(Label& label);
     void call(OperandX64 op);
 
+    void lea(RegisterX64 lhs, Label& label);
+
     void int3();
+    void ud2();
 
     void bsr(RegisterX64 dst, OperandX64 src);
     void bsf(RegisterX64 dst, OperandX64 src);
+    void bswap(RegisterX64 dst);
 
     // Code alignment
     void nop(uint32_t length = 1);
@@ -242,6 +247,7 @@ private:
     LUAU_NOINLINE void log(const char* opcode, OperandX64 op1, OperandX64 op2, OperandX64 op3, OperandX64 op4);
     LUAU_NOINLINE void log(Label label);
     LUAU_NOINLINE void log(const char* opcode, Label label);
+    LUAU_NOINLINE void log(const char* opcode, RegisterX64 reg, Label label);
     void log(OperandX64 op);
 
     const char* getSizeName(SizeX64 size) const;

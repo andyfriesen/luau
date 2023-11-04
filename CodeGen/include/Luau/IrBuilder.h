@@ -26,6 +26,7 @@ struct IrBuilder
 
     void rebuildBytecodeBasicBlocks(Proto* proto);
     void translateInst(LuauOpcode op, const Instruction* pc, int i);
+    void handleFastcallFallback(IrOp fallbackOrUndef, const Instruction* pc, int i);
 
     bool isInternalBlock(IrOp block);
     void beginBlock(IrOp block);
@@ -38,7 +39,6 @@ struct IrBuilder
 
     IrOp undef();
 
-    IrOp constBool(bool value);
     IrOp constInt(int value);
     IrOp constUint(unsigned value);
     IrOp constDouble(double value);
@@ -62,16 +62,23 @@ struct IrBuilder
     IrOp vmConst(uint32_t index);
     IrOp vmUpvalue(uint8_t index);
 
+    IrOp vmExit(uint32_t pcpos);
+
     bool inTerminatedBlock = false;
+
+    bool interruptRequested = false;
 
     bool activeFastcallFallback = false;
     IrOp fastcallFallbackReturn;
+    int fastcallSkipTarget = -1;
 
     IrFunction function;
 
     uint32_t activeBlockIdx = ~0u;
 
     std::vector<uint32_t> instIndexToBlock; // Block index at the bytecode instruction
+
+    std::vector<IrOp> loopStepStack;
 
     // Similar to BytecodeBuilder, duplicate constants are removed used the same method
     struct ConstantKey

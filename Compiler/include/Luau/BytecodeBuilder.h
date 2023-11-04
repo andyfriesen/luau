@@ -15,7 +15,7 @@ class BytecodeEncoder
 public:
     virtual ~BytecodeEncoder() {}
 
-    virtual uint8_t encodeOp(uint8_t op) = 0;
+    virtual void encode(uint32_t* data, size_t count) = 0;
 };
 
 class BytecodeBuilder
@@ -47,7 +47,7 @@ public:
     BytecodeBuilder(BytecodeEncoder* encoder = 0);
 
     uint32_t beginFunction(uint8_t numparams, bool isvararg = false);
-    void endFunction(uint8_t maxstacksize, uint8_t numupvalues);
+    void endFunction(uint8_t maxstacksize, uint8_t numupvalues, uint8_t flags = 0);
 
     void setMainFunction(uint32_t fid);
 
@@ -74,6 +74,8 @@ public:
     void foldJumps();
     void expandJumps();
 
+    void setFunctionTypeInfo(std::string value);
+
     void setDebugFunctionName(StringRef name);
     void setDebugFunctionLineDefined(int line);
     void setDebugLine(int line);
@@ -81,6 +83,7 @@ public:
     void pushDebugUpval(StringRef name);
 
     size_t getInstructionCount() const;
+    size_t getTotalInstructionCount() const;
     uint32_t getDebugPC() const;
 
     void addDebugRemark(const char* format, ...) LUAU_PRINTF_ATTR(2, 3);
@@ -118,6 +121,7 @@ public:
     std::string dumpFunction(uint32_t id) const;
     std::string dumpEverything() const;
     std::string dumpSourceRemarks() const;
+    std::string dumpTypeInfo() const;
 
     void annotateInstruction(std::string& result, uint32_t fid, uint32_t instpos) const;
 
@@ -132,6 +136,7 @@ public:
     static std::string getError(const std::string& message);
 
     static uint8_t getVersion();
+    static uint8_t getTypeEncodingVersion();
 
 private:
     struct Constant
@@ -186,6 +191,7 @@ private:
         std::string dump;
         std::string dumpname;
         std::vector<int> dumpinstoffs;
+        std::string typeinfo;
     };
 
     struct DebugLocal
@@ -227,6 +233,7 @@ private:
     uint32_t currentFunction = ~0u;
     uint32_t mainFunction = ~0u;
 
+    size_t totalInstructionCount = 0;
     std::vector<uint32_t> insns;
     std::vector<int> lines;
     std::vector<Constant> constants;
@@ -269,7 +276,7 @@ private:
     void dumpConstant(std::string& result, int k) const;
     void dumpInstruction(const uint32_t* opcode, std::string& output, int targetLabel) const;
 
-    void writeFunction(std::string& ss, uint32_t id) const;
+    void writeFunction(std::string& ss, uint32_t id, uint8_t flags) const;
     void writeLineInfo(std::string& ss) const;
     void writeStringTable(std::string& ss) const;
 
