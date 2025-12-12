@@ -10063,16 +10063,69 @@ TEST_CASE("DataDecl")
         print(Point)
     )";
     auto res0 = compileFunction(source.c_str(), 0, 0, 0);
-    CHECK("" == res0);
+    CHECK(R"(GETGLOBAL R2 K0 ['setmetatable']
+DUPTABLE R3 3
+LOADK R4 K1 ['x']
+GETTABLEKS R5 R1 K1 ['x']
+SETTABLE R5 R3 R4
+LOADK R4 K2 ['y']
+GETTABLEKS R5 R1 K2 ['y']
+SETTABLE R5 R3 R4
+GETUPVAL R4 0
+CALL R2 2 -1
+RETURN R2 -1
+)" == res0);
 
     auto res1 = compileFunction(source.c_str(), 1, 0, 0);
-    CHECK("" == res1);
+    CHECK(R"(LOADK R2 K0 ['x']
+JUMPIFNOTEQ R1 R2 L0
+GETGLOBAL R2 K1 ['rawget']
+MOVE R3 R0
+LOADK R4 K0 ['x']
+CALL R2 2 -1
+RETURN R2 -1
+L0: LOADK R2 K2 ['y']
+JUMPIFNOTEQ R1 R2 L1
+GETGLOBAL R2 K1 ['rawget']
+MOVE R3 R0
+LOADK R4 K2 ['y']
+CALL R2 2 -1
+RETURN R2 -1
+L1: LOADNIL R2
+GETGLOBAL R3 K1 ['rawget']
+GETUPVAL R4 0
+MOVE R5 R1
+CALL R3 2 1
+MOVE R2 R3
+JUMPIFNOT R2 L2
+RETURN R2 1
+L2: GETGLOBAL R3 K3 ['error']
+LOADK R5 K4 ['Record Point has no property ']
+MOVE R6 R1
+CONCAT R4 R5 R6
+CALL R3 1 0
+RETURN R0 0
+)" == res1);
 
     auto res2 = compileFunction(source.c_str(), 2, 0, 0);
-    CHECK("" == res2);
-
-    auto res3 = compileFunction(source.c_str(), 3, 0, 0);
-    CHECK("" == res3);
+    CHECK(R"(NEWTABLE R0 0 0
+SETTABLEKS R0 R0 K0 ['__index']
+NEWTABLE R1 0 0
+GETGLOBAL R2 K1 ['setmetatable']
+MOVE R3 R0
+MOVE R4 R1
+CALL R2 2 0
+NEWCLOSURE R2 P0
+CAPTURE VAL R0
+SETTABLEKS R2 R1 K2 ['__call']
+NEWCLOSURE R2 P1
+CAPTURE VAL R0
+SETTABLEKS R2 R0 K0 ['__index']
+GETGLOBAL R1 K3 ['print']
+MOVE R2 R0
+CALL R1 1 0
+RETURN R0 0
+)" == res2);
 }
 
 TEST_SUITE_END();
