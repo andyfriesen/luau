@@ -4630,12 +4630,24 @@ TEST_CASE_FIXTURE(Fixture, "data_declaration")
     CHECK(local->local == first->name);
 }
 
-TEST_CASE_FIXTURE(Fixture, "data_declaration_with_no_open_curly")
+TEST_CASE_FIXTURE(Fixture, "data_declaration_with_parse_errors")
 {
-    ParseResult res = tryParse(R"(
-        data Point2
-    )");
+    ParseResult res = tryParse("data");
+    CHECK(!res.errors.empty());
 
+    res = tryParse("data Point2");
+    CHECK(!res.errors.empty());
+
+    res = tryParse("data Point2 {");
+    CHECK(!res.errors.empty());
+
+    res = tryParse("data Point2 { foo:");
+    CHECK(!res.errors.empty());
+
+    res = tryParse("data Point2 { foo: bar");
+    CHECK(!res.errors.empty());
+
+    res = tryParse("data Point2 { foo: bar,");
     CHECK(!res.errors.empty());
 }
 
