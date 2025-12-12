@@ -1257,20 +1257,20 @@ AstStat* Parser::parseData(const Location& start)
 {
     Name name = parseName("data name");
 
-    if (!expectAndConsume('{', "data declaration"))
-        LUAU_ASSERT(0); // TODO
+    expectAndConsume('{', "data declaration");
+
+    MatchLexeme matchBrace = lexer.current();
 
     TempVector<AstDataProp> props(scratchDataProps);
 
     while (true)
     {
         if (lexer.current().type == '}')
-        {
-            nextLexeme();
             break;
-        }
 
         std::optional<Name> propName = parseNameOpt("data property name");
+        if (!propName)
+            return allocator.alloc<AstStatError>(lexer.current().location, copy<AstExpr*>({}), copy<AstStat*>({}), unsigned(parseErrors.size() - 1));
         LUAU_ASSERT(propName.has_value()); // TODO
 
         AstType* propType = nullptr;
@@ -1292,7 +1292,11 @@ AstStat* Parser::parseData(const Location& start)
             nextLexeme();
             continue;
         }
+        else if (lexer.current().type != '}')
+            break;
     }
+
+    expectMatchAndConsume('}', matchBrace, /* searchForMissing */ true);
 
     Location end = lexer.current().location;
 

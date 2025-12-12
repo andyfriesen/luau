@@ -4630,4 +4630,13 @@ TEST_CASE_FIXTURE(Fixture, "data_declaration")
     CHECK(local->local == first->name);
 }
 
+TEST_CASE_FIXTURE(Fixture, "data_declaration_with_no_open_curly")
+{
+    ParseResult res = tryParse(R"(
+        data Point2
+    )");
+
+    CHECK(!res.errors.empty());
+}
+
 TEST_SUITE_END();

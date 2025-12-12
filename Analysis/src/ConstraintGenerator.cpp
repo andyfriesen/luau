@@ -3883,7 +3883,8 @@ ConstraintGenerator::FunctionSignature ConstraintGenerator::checkFunctionSignatu
             if (AstExprLocal* indexLocal = indexName->expr->as<AstExprLocal>())
             {
                 DataDeclRecord* dataDeclRecord = dataDeclRecords.find(indexLocal->local);
-                selfType = dataDeclRecord->ty;
+                if (dataDeclRecord)
+                    selfType = dataDeclRecord->ty;
             }
         }
 
