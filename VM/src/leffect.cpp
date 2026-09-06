@@ -9,6 +9,7 @@
 
 static char kNoPreviousHandler = 0;
 
+#if 0
 int leffect_calleffect(lua_State* L)
 {
     luaL_checktype(L, 1, LUA_TTABLE);
@@ -30,6 +31,37 @@ int leffect_calleffect(lua_State* L)
 
     return lua_gettop(L);
 }
+#else
+
+int leffect_calleffectcont(lua_State* L, int status)
+{
+    if (status != LUA_OK)
+        lua_error(L);
+
+    return lua_gettop(L);
+}
+
+int leffect_calleffect(lua_State* L)
+{
+    luaL_checktype(L, 1, LUA_TTABLE);
+    int nargs = lua_gettop(L) - 1;
+
+    const TValue* handler = luaH_get(L->currenthandlers, L->base);
+
+    if (ttisnil(handler) || (ttisboolean(handler) && !bvalue(handler)))
+        luaL_error(L, "No error handler!");
+    if (!ttisfunction(handler))
+        luaL_error(L, "Invalid error handler!");
+
+    luaA_pushvalue(L, handler);
+
+    // Replace the effect with the handler.  Stack is now [handler, arg1, arg2, ...]
+    lua_replace(L, 1);
+
+    return lua_callyieldable(L, nargs, LUA_MULTRET);
+}
+
+#endif
 
 int leffect_neweffect(lua_State* L)
 {
@@ -42,7 +74,7 @@ int leffect_neweffect(lua_State* L)
 
     // create metatable
     lua_createtable(L, 0, 1);
-    lua_pushcfunction(L, &leffect_calleffect, "leffect_calleffect");
+    lua_pushcclosurek(L, &leffect_calleffect, "leffect_calleffect", 0, &leffect_calleffectcont);
     lua_setfield(L, -2, "__call");
 
     // set metatable
@@ -144,6 +176,7 @@ void leffect_pophandlers(lua_State* L, int undo)
     lua_remove(L, undo);
 }
 
+#if 0
 int leffect_with(lua_State* L)
 {
     luaL_checktype(L, 1, LUA_TTABLE);
@@ -171,3 +204,32 @@ int leffect_with(lua_State* L)
 
     return numreturns;
 }
+#else
+
+static int leffect_withcont(lua_State* L, int status)
+{
+    constexpr int undo = 3; // [handlers, callback, undo, ...]
+    leffect_pophandlers(L, undo); // also lua_remove(L, undo)
+
+    if (status != LUA_OK)
+        lua_error(L); // protected call left its error on top
+
+    // After removing undo: [handlers, callback, results...]
+    return lua_gettop(L) - 2;
+}
+
+int leffect_with(lua_State* L)
+{
+    luaL_checktype(L, 1, LUA_TTABLE);
+    luaL_checktype(L, 2, LUA_TFUNCTION);
+
+    leffect_pushhandlers(L, 1); // leaves undo at absolute index 3
+    lua_pushvalue(L, 2);
+
+    // Calls leffect_withcont immediately on synchronous completion, or after resume.
+    return lua_pcallyieldable(L, 0, LUA_MULTRET, 0);
+}
+
+// lua_pushcclosurek(L, leffect_with, "effect.with", 0, leffect_withcont);
+
+#endif
