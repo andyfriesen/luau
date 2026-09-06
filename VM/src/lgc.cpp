@@ -562,6 +562,9 @@ static size_t propagatemark(global_State* g)
 
         traversestack(g, th);
 
+        if (th->currenthandlers)
+            markobject(g, th->currenthandlers);
+
         // active threads will need to be rescanned later to mark new stack writes so we mark them gray again
         if (active)
         {

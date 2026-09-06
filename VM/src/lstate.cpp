@@ -104,6 +104,7 @@ static void preinit_state(lua_State* L, global_State* g)
     L->singlestep = false;
     L->isactive = false;
     L->activememcat = 0;
+    L->currenthandlers = NULL;
     L->userdata = NULL;
 }
 
@@ -145,6 +146,8 @@ lua_State* luaE_newthread(lua_State* L)
         L1->global = L->global;
     else
         preinit_state(L1, L->global);
+
+    L1->currenthandlers = luaH_clone(L, L->currenthandlers);
 
     L1->activememcat = L->activememcat; // inherit the active memory category
     stack_init(L1, L);                  // init stack
@@ -215,6 +218,8 @@ lua_State* lua_newstate(lua_Alloc allocator, void* ud)
         L->tt = LUA_TTHREAD;
         L->marked = g->currentwhite = bit2mask(WHITE0BIT, FIXEDBIT);
 
+        L->currenthandlers = luaH_new(L, 0, 0);
+
         L->global = g;
         g->mainthread = L;
 
@@ -269,6 +274,7 @@ lua_State* lua_newstate(lua_Alloc allocator, void* ud)
         preinit_state(L, g);
         g->frealloc = allocator;
         g->ud = ud;
+        L->currenthandlers = luaH_new(L, 0, 0);
         g->mainthread = L;
         g->uvhead.u.open.prev = &g->uvhead;
         g->uvhead.u.open.next = &g->uvhead;

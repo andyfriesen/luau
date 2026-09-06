@@ -309,6 +309,8 @@ struct lua_State
 
     TString* namecall; // when invoked from Luau using NAMECALL, what method do we need to invoke?
 
+    LuaTable* currenthandlers; // Table mapping effects to their current handlers
+
     void* userdata;
 };
 // clang-format on

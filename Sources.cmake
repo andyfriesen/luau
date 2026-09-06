@@ -421,6 +421,7 @@ target_sources(Luau.VM PRIVATE
     VM/src/lvector.cpp
     VM/src/lvmload.cpp
     VM/src/lvmutils.cpp
+    VM/src/leffect.cpp
 
     VM/src/lapi.h
     VM/src/lbuffer.h
