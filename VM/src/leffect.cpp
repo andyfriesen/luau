@@ -9,30 +9,6 @@
 
 static char kNoPreviousHandler = 0;
 
-#if 0
-int leffect_calleffect(lua_State* L)
-{
-    luaL_checktype(L, 1, LUA_TTABLE);
-    int nargs = lua_gettop(L) - 1;
-
-    const TValue* handler = luaH_get(L->currenthandlers, L->base);
-
-    if (!ttisnil(handler) || (ttisboolean(handler) && !bvalue(handler)))
-        luaL_error(L, "No error handler!");
-    if (!ttisfunction(handler))
-        luaL_error(L, "Invalid error handler!");
-
-    luaA_pushvalue(L, handler);
-
-    // Replace the effect with the handler.  Stack is now [handler, arg1, arg2, ...]
-    lua_replace(L, 1);
-
-    lua_call(L, nargs, LUA_MULTRET);
-
-    return lua_gettop(L);
-}
-#else
-
 int leffect_calleffectcont(lua_State* L, int status)
 {
     if (status != LUA_OK)
@@ -60,8 +36,6 @@ int leffect_calleffect(lua_State* L)
 
     return lua_callyieldable(L, nargs, LUA_MULTRET);
 }
-
-#endif
 
 int leffect_neweffect(lua_State* L)
 {
@@ -176,36 +150,6 @@ void leffect_pophandlers(lua_State* L, int undo)
     lua_remove(L, undo);
 }
 
-#if 0
-int leffect_with(lua_State* L)
-{
-    luaL_checktype(L, 1, LUA_TTABLE);
-    luaL_checktype(L, 2, LUA_TFUNCTION);
-
-    int undo = leffect_pushhandlers(L, 1);
-
-    int numreturns = 0;
-    int callstatus = 0;
-
-    // Second, invoke the function.
-    {
-        int before = lua_gettop(L);
-
-        lua_pushvalue(L, 2);
-        callstatus = lua_pcall(L, 0, LUA_MULTRET, 0);
-        if (callstatus == LUA_OK)
-            numreturns = lua_gettop(L) - before;
-    }
-
-    leffect_pophandlers(L, undo);
-
-    if (callstatus != LUA_OK)
-        lua_error(L);
-
-    return numreturns;
-}
-#else
-
 static int leffect_withcont(lua_State* L, int status)
 {
     constexpr int undo = 3; // [handlers, callback, undo, ...]
@@ -231,5 +175,3 @@ int leffect_with(lua_State* L)
 }
 
 // lua_pushcclosurek(L, leffect_with, "effect.with", 0, leffect_withcont);
-
-#endif
