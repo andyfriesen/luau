@@ -7,6 +7,8 @@
 #include "lualib.h"
 #include "lvm.h"
 
+static char kNoPreviousHandler = 0;
+
 int leffect_calleffect(lua_State* L)
 {
     luaL_checktype(L, 1, LUA_TTABLE);
@@ -14,7 +16,7 @@ int leffect_calleffect(lua_State* L)
 
     const TValue* handler = luaH_get(L->currenthandlers, L->base);
 
-    if (ttisnil(handler))
+    if (!ttisnil(handler) || (ttisboolean(handler) && !bvalue(handler)))
         luaL_error(L, "No error handler!");
     if (!ttisfunction(handler))
         luaL_error(L, "Invalid error handler!");
@@ -52,10 +54,15 @@ int leffect_neweffect(lua_State* L)
     return 1;
 }
 
-int leffect_with(lua_State* L)
+/**
+ * Install a set of new effects.  Pushes an undo record onto the stack and
+ * returns its offset.
+ *
+ * neweffects is a stack offset where a table of new effects can be found.
+ */
+int leffect_pushhandlers(lua_State* L, int neweffects)
 {
-    luaL_checktype(L, 1, LUA_TTABLE);
-    luaL_checktype(L, 2, LUA_TFUNCTION);
+    neweffects = lua_absindex(L, neweffects);
 
     lua_createtable(L, 0, 2);
     int undo = lua_absindex(L, -1);
@@ -71,7 +78,7 @@ int leffect_with(lua_State* L)
 
         lua_pushnil(L);
 
-        while (lua_next(L, 1) != 0)
+        while (lua_next(L, neweffects) != 0)
         {
             // key at -2
             // value at -1
@@ -80,9 +87,9 @@ int leffect_with(lua_State* L)
             const TValue* oldhandler = luaH_get(L->currenthandlers, L->top - 2);
 
             lua_pushvalue(L, -2); // effect key
-            // Replace nil with false so that next->handlers actually has the key.
+            // Replace nil with a magic sentinel so that next->handlers actually has the key.
             if (ttisnil(oldhandler))
-                lua_pushboolean(L, false);
+                lua_pushlightuserdata(L, &kNoPreviousHandler);
             else
                 luaA_pushvalue(L, oldhandler);
 
@@ -98,6 +105,52 @@ int leffect_with(lua_State* L)
         }
     }
 
+    return undo;
+}
+
+/**
+ * Uninstall the topmost set of effect handlers.
+ * 
+ * * undo is the stack offset pointing to a table craeted by leffect_pushhandlers.
+ *   This stack entry is consumed by leffect_pophandlers.
+ */
+void leffect_pophandlers(lua_State* L, int undo)
+{
+    // for k, v in undo_stack.effects do
+    //     current_effects[k] = undo_stack.effects[k]
+    // end
+
+    lua_pushnil(L);
+
+    while (lua_next(L, undo))
+    {
+        // key at -2
+        // value at -1
+
+        TValue* restorehandler = luaH_set(L, L->currenthandlers, L->top - 2);
+        // Undo records retain a magic sentinel instead of nil.  Reverse that here so that
+        // L->currenthandlers doesn't increase in size forever.
+        if (lua_type(L, -1) == LUA_TLIGHTUSERDATA && lua_tolightuserdata(L, -1) == &kNoPreviousHandler)
+            setnilvalue(restorehandler);
+        else
+        {
+            setobj2t(L, restorehandler, L->top - 1);
+            luaC_barriert(L, L->currenthandlers, L->top - 1);
+        }
+
+        lua_pop(L, 1);
+    }
+
+    lua_remove(L, undo);
+}
+
+int leffect_with(lua_State* L)
+{
+    luaL_checktype(L, 1, LUA_TTABLE);
+    luaL_checktype(L, 2, LUA_TFUNCTION);
+
+    int undo = leffect_pushhandlers(L, 1);
+
     int numreturns = 0;
     int callstatus = 0;
 
@@ -111,33 +164,7 @@ int leffect_with(lua_State* L)
             numreturns = lua_gettop(L) - before;
     }
 
-    // Last, pop the effect frame
-    {
-        // for k, v in undo_stack.effects do
-        //     current_effects[k] = undo_stack.effects[k]
-        // end
-
-        lua_pushnil(L);
-
-        while (lua_next(L, undo))
-        {
-            // key at -2
-            // value at -1
-
-            TValue* restorehandler = luaH_set(L, L->currenthandlers, L->top - 2);
-            // Undo records retain false instead of nil.  Reverse that here so that
-            // L->currenthandlers doesn't increase in size forever.
-            if (!lua_toboolean(L, -1))
-                setnilvalue(restorehandler);
-            else
-            {
-                setobj2t(L, restorehandler, L->top - 1);
-                luaC_barriert(L, L->currenthandlers, L->top - 1);
-            }
-
-            lua_pop(L, 1);
-        }
-    }
+    leffect_pophandlers(L, undo);
 
     if (callstatus != LUA_OK)
         lua_error(L);
