@@ -9,7 +9,24 @@
 
 int leffect_calleffect(lua_State* L)
 {
-    // draw the owl
+    luaL_checktype(L, 1, LUA_TTABLE);
+    int nargs = lua_gettop(L) - 1;
+
+    const TValue* handler = luaH_get(L->currenthandlers, L->base);
+
+    if (ttisnil(handler))
+        luaL_error(L, "No error handler!");
+    if (!ttisfunction(handler))
+        luaL_error(L, "Invalid error handler!");
+
+    luaA_pushvalue(L, handler);
+
+    // Replace the effect with the handler.  Stack is now [handler, arg1, arg2, ...]
+    lua_replace(L, 1);
+
+    lua_call(L, nargs, LUA_MULTRET);
+
+    return lua_gettop(L);
 }
 
 int leffect_neweffect(lua_State* L)
@@ -45,10 +62,6 @@ int leffect_with(lua_State* L)
 
     // First, push the new effect frame onto the stack.
     {
-        // LuauEffectRecord* next = (LuauEffectRecord*)L->global->frealloc(L->global->ud, NULL, 0, sizeof(LuauEffectRecord));
-        // next->handlers = luaH_new(L, 0, 2);
-        // next->previous = NULL;
-
         /*
             for k, v in handlers do
                 undo.effects[k] = current_effects[k] or none
@@ -60,7 +73,6 @@ int leffect_with(lua_State* L)
 
         while (lua_next(L, 1) != 0)
         {
-            // Stack: handlers, function, undo, effect, handler
             // key at -2
             // value at -1
 
