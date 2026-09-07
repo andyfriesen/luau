@@ -57,8 +57,4 @@ It was the best of times, it was the worst of times.
 But mostly, it was just the absolute worst.
 Really awful
 Trace captured 6 elements
-src/luau/VM/src/lstate.cpp(126): ASSERTION FAILED: g->totalbytes == sizeof(LG)
-zsh: illegal hardware instruction (core dumped)  ./luau ../hello_effect.luau
-
-That last part isn't on purpose.
 ]]
