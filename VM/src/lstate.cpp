@@ -73,6 +73,7 @@ static void f_luaopen(lua_State* L, void* ud)
     global_State* g = L->global;
     stack_init(L, L);                             // init stack
     L->gt = luaH_new(L, 0, 2);                    // table of globals
+    L->currenthandlers = luaH_new(L, 0, 0);       // Effect environment
     sethvalue(L, registry(L), luaH_new(L, 0, 2)); // registry
     luaS_resize(L, LUA_MINSTRTABSIZE);            // initial size of string table
     luaT_init(L);
@@ -225,8 +226,6 @@ lua_State* lua_newstate(lua_Alloc allocator, void* ud)
         g->frealloc = allocator;
         g->ud = ud;
 
-        L->currenthandlers = luaH_new(L, 0, 0);
-
         g->uvhead.u.open.prev = &g->uvhead;
         g->uvhead.u.open.next = &g->uvhead;
 
@@ -275,7 +274,6 @@ lua_State* lua_newstate(lua_Alloc allocator, void* ud)
         preinit_state(L, g);
         g->frealloc = allocator;
         g->ud = ud;
-        L->currenthandlers = luaH_new(L, 0, 0);
         g->mainthread = L;
         g->uvhead.u.open.prev = &g->uvhead;
         g->uvhead.u.open.next = &g->uvhead;
