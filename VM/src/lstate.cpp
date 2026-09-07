@@ -218,13 +218,13 @@ lua_State* lua_newstate(lua_Alloc allocator, void* ud)
         L->tt = LUA_TTHREAD;
         L->marked = g->currentwhite = bit2mask(WHITE0BIT, FIXEDBIT);
 
-        L->currenthandlers = luaH_new(L, 0, 0);
-
         L->global = g;
         g->mainthread = L;
 
         g->frealloc = allocator;
         g->ud = ud;
+
+        L->currenthandlers = luaH_new(L, 0, 0);
 
         g->uvhead.u.open.prev = &g->uvhead;
         g->uvhead.u.open.next = &g->uvhead;

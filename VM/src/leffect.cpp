@@ -7,8 +7,6 @@
 #include "lualib.h"
 #include "lvm.h"
 
-static char kNoPreviousHandler = 0;
-
 int leffect_calleffectcont(lua_State* L, int status)
 {
     if (status != LUA_OK)
@@ -60,8 +58,74 @@ int leffect_neweffect(lua_State* L)
     return 1;
 }
 
+static void push_currenthandlers(lua_State* L)
+{
+    TValue env;
+    sethvalue(L, &env, L->currenthandlers);
+    luaC_threadbarrier(L);
+    luaA_pushvalue(L, &env);
+}
+
+static void pop_currenthandlers(lua_State* L)
+{
+    LUAU_ASSERT(ttistable(L->top - 1));
+
+    L->currenthandlers = hvalue(L->top - 1);
+    luaC_threadbarrier(L);
+    lua_pop(L, 1);
+}
+
+static int leffect_invokehandler(lua_State* L)
+{
+    const int nargs = lua_gettop(L);
+
+    // 1. Save `L->currenthandlers` on the stack (sound familiar?)
+    push_currenthandlers(L);
+
+    // 2. Update `L->currenthandlers`
+    lua_pushvalue(L, lua_upvalueindex(2));
+    pop_currenthandlers(L);
+
+    // Save the parent effect environment at (L, 1) for the continuation to restore.
+    lua_insert(L, 1);
+
+    // 4. Invoke the effect callback
+    lua_pushvalue(L, lua_upvalueindex(1));
+    lua_insert(L, 2);
+
+    return lua_pcallyieldable(L, nargs, LUA_MULTRET, 0);
+}
+
+static int leffect_invokehandlercont(lua_State* L, int status)
+{
+    // 4. Restore `L->currenthandlers`
+    lua_pushvalue(L, 1);
+    pop_currenthandlers(L);
+    lua_remove(L, 1);
+
+    // 5. Return the function results
+    if (status != LUA_OK)
+        lua_error(L);
+
+    return lua_gettop(L);
+}
+
+static void push_invoke(lua_State* L, int handler)
+{
+    handler = lua_absindex(L, handler);
+
+    lua_pushvalue(L, handler); // Upvalue 1: The handler.
+
+    if (!lua_isfunction(L, -1))
+        return;
+
+    push_currenthandlers(L); // Upvalue 2: The effect environment.
+
+    lua_pushcclosurek(L, &leffect_invokehandler, "leffect_invokehandler", 2, &leffect_invokehandlercont);
+}
+
 /**
- * Install a set of new effects.  Pushes an undo record onto the stack and
+ * Install a set of new effects.  Pushes a parent snapshot onto the stack and
  * returns its offset.
  *
  * neweffects is a stack offset where a table of new effects can be found.
@@ -70,15 +134,16 @@ int leffect_pushhandlers(lua_State* L, int neweffects)
 {
     neweffects = lua_absindex(L, neweffects);
 
-    lua_createtable(L, 0, 2);
-    int undo = lua_absindex(L, -1);
+    push_currenthandlers(L);
+    int original = lua_absindex(L, -1);
+    lua_clonetable(L, -1);
+    int clone = lua_absindex(L, -1);
 
     // First, push the new effect frame onto the stack.
     {
         /*
             for k, v in handlers do
-                undo.effects[k] = current_effects[k] or none
-                current_effects[k] = v
+                clone.effects[k] = v
             end
         */
 
@@ -86,68 +151,39 @@ int leffect_pushhandlers(lua_State* L, int neweffects)
 
         while (lua_next(L, neweffects) != 0)
         {
-            // key at -2
-            // value at -1
+            int key = lua_absindex(L, -2);
+            int value = lua_absindex(L, -1);
 
-            // undo[key] = current_handler[k] or false
-            const TValue* oldhandler = luaH_get(L->currenthandlers, L->top - 2);
+            lua_pushvalue(L, key);
 
-            lua_pushvalue(L, -2); // effect key
-            // Replace nil with a magic sentinel so that next->handlers actually has the key.
-            if (ttisnil(oldhandler))
-                lua_pushlightuserdata(L, &kNoPreviousHandler);
-            else
-                luaA_pushvalue(L, oldhandler);
+            // TODO?  Fail if the handler is not a function or false.
+            push_invoke(L, value);
 
-            // undo[effect] = oldhandler or false
-            lua_rawset(L, undo);
-
-            // current_effects[k] = v
-            TValue* newhandler = luaH_set(L, L->currenthandlers, L->top - 2);
-            setobj2t(L, newhandler, L->top - 1);
-            luaC_barrier(L, L->currenthandlers, L->top - 1);
+            // clone[effect] = handler[effect]
+            lua_rawset(L, clone);
 
             lua_pop(L, 1);
         }
     }
 
-    return undo;
+    // Stack is: [original handlers, updated handlers]
+    // Pop the latter into L->currenthandlers
+    pop_currenthandlers(L);
+
+    return original;
 }
 
 /**
  * Uninstall the topmost set of effect handlers.
  * 
- * * undo is the stack offset pointing to a table craeted by leffect_pushhandlers.
- *   This stack entry is consumed by leffect_pophandlers.
+ * parent is the stack offset pointing the saved handler snapshot created
+ * by leffect_pushhandlers.  This stack entry is consumed.
  */
-void leffect_pophandlers(lua_State* L, int undo)
+void leffect_pophandlers(lua_State* L, int parent)
 {
-    // for k, v in undo_stack.effects do
-    //     current_effects[k] = undo_stack.effects[k]
-    // end
-
-    lua_pushnil(L);
-
-    while (lua_next(L, undo))
-    {
-        // key at -2
-        // value at -1
-
-        TValue* restorehandler = luaH_set(L, L->currenthandlers, L->top - 2);
-        // Undo records retain a magic sentinel instead of nil.  Reverse that here so that
-        // L->currenthandlers doesn't increase in size forever.
-        if (lua_type(L, -1) == LUA_TLIGHTUSERDATA && lua_tolightuserdata(L, -1) == &kNoPreviousHandler)
-            setnilvalue(restorehandler);
-        else
-        {
-            setobj2t(L, restorehandler, L->top - 1);
-            luaC_barriert(L, L->currenthandlers, L->top - 1);
-        }
-
-        lua_pop(L, 1);
-    }
-
-    lua_remove(L, undo);
+    lua_pushvalue(L, parent);
+    pop_currenthandlers(L);
+    lua_remove(L, parent);
 }
 
 static int leffect_withcont(lua_State* L, int status)
