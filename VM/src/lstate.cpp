@@ -112,6 +112,7 @@ static void close_state(lua_State* L)
 {
     global_State* g = L->global;
     luaF_close(L, L->stack); // close all upvalues for this thread
+    // TODO:  Let go of L->currenthandlers properly
     luaC_freeall(L);         // collect all objects
     LUAU_ASSERT(g->strt.nuse == 0);
     luaM_freearray(L, L->global->strt.hash, L->global->strt.size, TString*, 0);

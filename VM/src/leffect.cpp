@@ -22,10 +22,11 @@ int leffect_calleffect(lua_State* L)
 
     const TValue* handler = luaH_get(L->currenthandlers, L->base);
 
+    // TODO: Print out the effect name as part of the error message.
     if (ttisnil(handler) || (ttisboolean(handler) && !bvalue(handler)))
-        luaL_error(L, "No error handler!");
+        luaL_error(L, "No effect handler!");
     if (!ttisfunction(handler))
-        luaL_error(L, "Invalid error handler!");
+        luaL_error(L, "Invalid effect handler!");
 
     luaA_pushvalue(L, handler);
 
@@ -42,7 +43,7 @@ int leffect_neweffect(lua_State* L)
     // create the effect itself. (TODO: prim?  Userdata?)
     lua_createtable(L, 0, 1);
     lua_pushvalue(L, 1);
-    lua_setfield(L, -1, "name");
+    lua_setfield(L, -2, "name");
 
     // create metatable
     lua_createtable(L, 0, 1);
@@ -211,3 +212,17 @@ int leffect_with(lua_State* L)
 }
 
 // lua_pushcclosurek(L, leffect_with, "effect.with", 0, leffect_withcont);
+
+static const luaL_Reg effect_funcs[] = {
+    {"create", leffect_neweffect},
+};
+
+int luaopen_effect(lua_State* L)
+{
+    luaL_register(L, LUA_EFFECTNAME, effect_funcs);
+
+    lua_pushcclosurek(L, leffect_with, "effect.with", 0, leffect_withcont);
+    lua_setfield(L, -2, "with");
+
+    return 1;
+}
